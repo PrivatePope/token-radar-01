@@ -1,14 +1,11 @@
-// A working token-radar-01 entry (Node 22, standard library only), radar-6.
+// main.ts — token radar entry (Node 22+, standard library only).
 //
-// The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// eligible pre-token protocol with the radar-6 model in lib/model.ts (the radar-5 expected value,
-// unchanged), writes the ranked board to /output/board.json, and copies this repository's dashboard/
-// and screenshots/ to /output. Last, it writes /output/dossier.json, the summary the judge reads,
-// with the vendored make.fun library.
-//
-// The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/app.css
-// and dashboard/app.js read /output/data.js, which this program writes from the same board. The board
-// is identical to radar-5's (the model did not change); every radar-6 change is in the dossier.
+// Reads the sealed snapshot (--input <snapshot.json|directory>, or /input), scores every
+// pre-token protocol with the model in lib/model.ts, writes the ranked board to
+// board.json, the page's data to data.js, and copies this repository's dashboard/ and
+// screenshots/ into the output. Last, it writes dossier.json with the vendored make.fun
+// library — the summary the judge reads. The scorer rebuilds that dossier from the same
+// output and compares bytes, so it is written last.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -21,7 +18,7 @@ import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
-/** The scorer's own caps (reference/gate.json): the text cap shapes the bytes, the rest refuse. */
+/** The scorer's own caps: the text cap shapes the bytes, the rest refuse. */
 const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
@@ -85,9 +82,10 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const top = board[0]!;
+const dashBytes = readdirSync(join(out, 'dashboard')).reduce((s, f) => s + statSync(join(out, 'dashboard', f)).size, 0);
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: model ${radar.model_version}, top pick ${board[0]!.name} at $${board[0]!.implied_value_usd.toLocaleString('en-US')} expected value\n` +
-    `token radar: ${radar.total_accounted} of ${snapshot.protocols.length} protocols accounted for (${board.length} ranked, ${radar.excluded_size} excluded, ${radar.live_size} live shown, ${radar.live_rest_size} live beyond)\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.excluded.length} pre-token excluded, ${radar.live.length} live shown, ${radar.live_rest.length} live set aside)\n` +
+    `token radar: top pick ${top.name} EV $${top.implied_value_usd.toLocaleString()} (rank range ${top.rank_lo}-${top.rank_hi}); bootstrap coverage ${radar.meta.coverage}/${radar.meta.coverage_n}; dashboard source ${dashBytes} bytes (cap 65536)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
