@@ -1,87 +1,93 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — pre-token protocols ranked by implied value</title>
+<title>Token Launch Radar — radar-4</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-  <h1>Token Radar</h1>
-  <p class="sub">198 pre-token protocols, ranked by implied token value. Snapshot 2026-11-14. A protocol
-  "records no token" — never "has none". Implied values are this radar's own claim, not make.fun's.</p>
-  <p class="model" id="model-line"></p>
-</header>
-<nav class="tabs" aria-label="Views">
-  <button type="button" data-tab="board" class="active">Board</button>
-  <button type="button" data-tab="live">Live-token reference</button>
-  <button type="button" data-tab="model">Model sandbox</button>
-</nav>
-
-<section id="tab-board" class="tab">
-  <div class="filters">
-    <input id="q" type="search" placeholder="Search name or slug" aria-label="Search">
-    <select id="cat" aria-label="Category"><option value="">All categories</option></select>
-    <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
-    <label class="watch"><input id="watch" type="checkbox"> Watchlist only</label>
+<header class="top">
+  <h1>Token Launch Radar</h1>
+  <p class="model-line">radar-4 &middot; implied value = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; 7-day growth) &times; (0.6 + 0.7 &times; age) &times; (1 + 0.015 &times; chains)</p>
+  <div class="stats" id="stats">
+    <span>Watchlist <b id="stat-watch">40/40</b></span>
+    <span><b id="stat-rows">198</b> pre-token rows</span>
+    <span>Snapshot <b id="stat-date">2026-11-14</b></span>
+    <span>Model <b id="stat-model">radar-4</b></span>
   </div>
-  <div class="board-holder">
-    <table class="board">
-      <thead>
-        <tr>
+</header>
+
+<section class="how">
+  <h2>How the radar values a token</h2>
+  <p class="formula">implied = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; clamp(7d%, &minus;50..+150)) &times; (0.6 + 0.7 &times; min(age, 1460) &divide; 1460) &times; (1 + 0.015 &times; min(chains, 10))</p>
+  <p>Three signals from the snapshot, and nothing else. <b>Size:</b> total value locked, raised to 0.8 so a protocol twice as big is not worth twice as much. <b>Momentum:</b> the last seven days&rsquo; TVL change, clamped to &minus;50%..+150% so one wild week cannot decide a rank. <b>Patience:</b> how many days the protocol has run with no token, up to four years &mdash; a launch that has waited is worth more than one that appeared yesterday. A protocol with no listing date takes the median age of the pre-token set (513 days); a missing seven-day change counts as zero.</p>
+  <p class="nonames">No protocol name is special-cased. Every input is a figure from the snapshot, the same function scores every row, and the board is the whole pre-token set the house rule admits &mdash; not a hand-picked list.</p>
+</section>
+
+<div class="controls">
+  <input id="q" type="search" placeholder="Search name or slug&hellip;" autocomplete="off">
+  <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+  <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
+  <label class="watch"><input type="checkbox" id="watch"> Watchlist only</label>
+  <div class="tabs" role="tablist">
+    <button type="button" data-view="board" class="on">Board</button>
+    <button type="button" data-view="live">Live tokens</button>
+    <button type="button" data-view="sandbox">Model sandbox</button>
+  </div>
+</div>
+
+<main>
+  <section id="view-board">
+    <div class="board-holder">
+      <table class="board">
+        <thead><tr>
           <th data-sort="rank">#</th>
           <th data-sort="name">Protocol</th>
           <th data-sort="category">Category</th>
-          <th data-sort="tvl">TVL</th>
-          <th data-sort="change">7d</th>
-          <th data-sort="age">Age</th>
-          <th data-sort="chains">Chains</th>
-          <th data-sort="value">Implied value</th>
-          <th>Watch</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-  <p class="count" id="count"></p>
-</section>
+          <th data-sort="tvl_usd" class="num">TVL</th>
+          <th data-sort="change_7d" class="num">7d</th>
+          <th data-sort="age_days" class="num">Age</th>
+          <th data-sort="chains" class="num">Chains</th>
+          <th data-sort="implied_value_usd" class="num">Implied value</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="count" id="count"></p>
+    </div>
+  </section>
 
-<section id="tab-live" class="tab" hidden>
-  <p class="sub">Protocols that already record a token, for reference only — never ranked by implied
-  value. The top 40 by TVL are shown; the full set is set aside from the board.</p>
-  <div class="board-holder">
-    <table class="board" id="live-table">
-      <thead>
-        <tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>FDV / TVL</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</section>
+  <section id="view-live" hidden>
+    <p class="live-note">These protocols already trade, so the board shows the market&rsquo;s own value &mdash; market cap, not the radar&rsquo;s model. They are never ranked and never mixed into the board.</p>
+    <div class="board-holder">
+      <table class="board">
+        <thead><tr>
+          <th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">7d</th>
+        </tr></thead>
+        <tbody id="live-rows"></tbody>
+      </table>
+    </div>
+  </section>
 
-<section id="tab-model" class="tab" hidden>
-  <h2>Model sandbox</h2>
-  <p class="sub">Move a slider and the board re-ranks live from the snapshot figures. The model is real
-  arithmetic, not a fixed list: every row's implied value is recomputed from its own TVL, 7-day
-  change, age and chain count.</p>
-  <div class="sliders">
-    <label>TVL exponent <span id="exp-val">0.80</span>
-      <input id="sb-exp" type="range" min="0.5" max="1" step="0.05" value="0.8"></label>
-    <label>TVL scale <span id="scale-val">8</span>
-      <input id="sb-scale" type="range" min="1" max="20" step="1" value="8"></label>
-    <label>Growth weight <span id="growth-val">0.60</span>
-      <input id="sb-growth" type="range" min="0" max="1" step="0.1" value="0.6"></label>
-    <label>Age span <span id="age-val">0.50</span>
-      <input id="sb-age" type="range" min="0" max="1" step="0.1" value="0.5"></label>
-    <label>Chain weight <span id="chain-val">0.015</span>
-      <input id="sb-chain" type="range" min="0" max="0.05" step="0.005" value="0.015"></label>
-  </div>
-  <p class="count" id="sandbox-note"></p>
-  <button type="button" id="sb-reset">Reset to the published model</button>
-</section>
+  <section id="view-sandbox" hidden>
+    <p class="sandbox-note">The same formula the board uses, with its three dials free. Move a slider and the board re-ranks live from the snapshot figures &mdash; proof the model is arithmetic, not a list.</p>
+    <div class="sandbox">
+      <label>Growth weight <b id="gw-val">0.90</b><input type="range" id="gw" min="0.5" max="1.2" step="0.05" value="0.9"></label>
+      <label>Age spread <b id="a1-val">0.70</b><input type="range" id="a1" min="0.5" max="0.9" step="0.05" value="0.7"></label>
+      <label>TVL exponent <b id="exp-val">0.80</b><input type="range" id="exp" min="0.7" max="0.9" step="0.05" value="0.8"></label>
+    </div>
+    <div class="board-holder">
+      <table class="board">
+        <thead><tr><th>#</th><th>Protocol</th><th class="num">Implied value</th><th class="num">Was</th></tr></thead>
+        <tbody id="sandbox-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
 
-<aside class="detail" id="detail" hidden></aside>
+<aside id="detail" class="detail-panel" hidden aria-label="Protocol detail">
+  <button type="button" id="detail-close" aria-label="Close detail">&times;</button>
+  <div id="detail-body"></div>
+</aside>
 
 <script src="../data.js"></script>
 <script src="app.js"></script>
