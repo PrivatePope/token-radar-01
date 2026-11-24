@@ -1,376 +1,317 @@
-// app.js — the token-radar dashboard. Static page, no framework, no network.
-// Reads window.RADAR (written by main.ts from the same board), renders the
-// sortable/filterable board, a detail view per protocol with the model's full
-// breakdown and its farm plan, a live-token reference, and a model sandbox
-// that re-ranks the board live from the snapshot figures.
+// Token Launch Radar — radar-4 dashboard.
+//
+// The model lives here, in plain arithmetic, so the page and the board agree. Every row is
+// scored by the same function, from the snapshot's own figures only:
+//
+//   implied = TVL^0.8 x 8 x (1 + 0.9 x clamp(7d%, -50..+150))
+//                   x (0.6 + 0.7 x min(age, 1460) / 1460)
+//                   x (1 + 0.015 x min(chains, 10))
+//
+// Size (TVL), momentum (the last seven days) and patience (days run with no token). A protocol
+// with no listing date takes the median age of the pre-token set; a missing seven-day change
+// counts as zero. No protocol name is special-cased anywhere in this file.
 
-const R = window.RADAR;
-const rows = R.rows;
-const bySlug = new Map(rows.map((r) => [r.s, r]));
+const RADAR = window.RADAR;
+const MODEL = RADAR.model;
+const MEDIAN_AGE = RADAR.median_age_days;
+const ROWS = RADAR.rows;
+const LIVE = RADAR.live;
 
-/** Money: $2.75B, $287M, $44M. */
-function fmtMoney(v) {
-  if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
-  if (v >= 1e6) return '$' + Math.round(v / 1e6) + 'M';
-  return '$' + Math.round(v / 1e3) + 'K';
-}
-function fmtAge(days) {
-  if (days >= 365) return (days / 365).toFixed(1) + 'y';
-  return days + 'd';
-}
-function fmtChange(g) {
-  if (g === null || g === undefined) return '—';
-  return (g > 0 ? '+' : '') + g.toFixed(1) + '%';
-}
-function el(tag, text, cls) {
-  const n = document.createElement(tag);
-  if (text !== undefined && text !== null) n.textContent = text;
-  if (cls) n.className = cls;
-  return n;
-}
-const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+// ---------------------------------------------------------------- the model
 
-// ------------------------------------------------------------- farm plans
-// The same templates the model uses for board.json, so the detail view
-// shows the exact plan the board carries for each protocol.
+function clamp(x, lo, hi) { return Math.min(hi, Math.max(lo, x)); }
 
-const CATEGORY_ACTIONS = {
-  Dexs: 'swap a small amount through its highest-volume pool and, if it offers one, add liquidity to that pair',
-  Lending: 'supply an accepted asset as collateral and borrow a small amount against it',
-  Yield: 'deposit into its highest-TVL vault and note the quoted yield',
-  RWA: 'join its tokenized-asset offering after reading the underlying asset documentation',
-  'Basis Trading': 'open a small delta-neutral position through its basis vault',
-  'Risk Curators': 'allocate to a curator vault and read the curator strategy note before depositing',
-  Derivatives: 'open a small position on its main derivatives market and set a firm exit',
-  CDP: 'mint a small amount of its stable asset against collateral and watch the ratio',
-  'Yield Aggregator': 'deposit into its top auto-compounding vault',
-  'Liquidity Manager': 'deposit into its managed liquidity position on the busiest pair',
-  'Staking Pool': 'stake a small amount in its main pool and confirm rewards accrue',
-  Restaking: 'restake a small amount through its main restaking vault',
-  'Cross Chain Bridge': 'bridge a small test amount across its busiest route and confirm arrival',
-  'Prediction Market': 'take a small position on a high-volume market and track the odds',
-  Insurance: 'buy a small cover policy on its main product and read the payout terms',
-  Indexes: 'buy a small amount of its index token and track the constituents',
-  Payments: 'run a small payment through its rails and confirm settlement',
-  Privacy: 'use its privacy product with a small test amount and verify the flow',
-  'Options Vault': 'deposit a small amount into its main options vault',
-  Farm: 'deposit into its highest-TVL farm and note the reward rate',
-  'Leveraged Farming': 'open a small leveraged farm position and watch the liquidation level',
-  'Onchain Capital Allocator': 'allocate a small amount to its top strategy and read the allocation note',
-  'Uncollateralized Lending': 'lend a small amount through its main credit pool',
-  'Interest Rate Derivatives': 'take a small position on its main rate market',
-  'Decentralized BTC': 'use its BTC product with a small test amount',
-  'Anchor BTC': 'deposit a small amount into its anchor BTC vault',
-  'Stablecoin Wrapper': 'wrap a small amount through its wrapper and confirm the peg',
-  'Dual-Token Stablecoin': 'mint a small amount of its stable asset against collateral',
-  'OTC Marketplace': 'place a small order on its OTC desk and confirm settlement',
-  'Governance Incentives': 'participate in its governance program with a small stake',
-  'Crypto Card Issuer': 'order its card and run a small test payment',
-  'Collateral Markets': 'supply collateral to its main market and track the rate',
-  CeDeFi: 'deposit a small amount into its CeDeFi vault',
-  'CDP Manager': 'open a small managed CDP position',
-  Chain: 'use its chain with a small test transaction and confirm finality',
-};
-const DEFAULT_ACTION = 'use its main product with a small test position and confirm the flow end to end';
-const CHAIN_GAS_USD = {
-  Ethereum: 15, Solana: 1, Base: 1, Arbitrum: 2, BSC: 1, Polygon: 1, Avalanche: 2,
-  Optimism: 1, Linea: 1, Blast: 1, Scroll: 1, Mantle: 1, Berachain: 1, Sui: 1,
-  Aptos: 1, Tron: 2, Fantom: 1, Gnosis: 1,
-};
-function capitalFor(tvl) {
-  if (tvl < 100_000_000) return 50;
-  if (tvl < 1_000_000_000) return 100;
-  return 250;
+/** A row's age in days: its own listing date, or the pre-token set's median when it has none. */
+function ageOf(row) { return row.age_days === null || row.age_days === undefined ? MEDIAN_AGE : row.age_days; }
+
+/**
+ * The implied value of one row under a model, with every factor shown. The board, the detail
+ * panel and the sandbox all call this one function, so the page can never disagree with itself.
+ */
+function impliedValue(row, m) {
+  const age = ageOf(row);
+  const growthPct = clamp(row.change_7d === null ? 0 : row.change_7d, m.growth_floor, m.growth_cap);
+  const growthMult = 1 + (growthPct / 100) * m.growth_weight;
+  const ageMult = m.age_floor + (Math.min(Math.max(age, 0), m.age_days) / m.age_days) * m.age_range;
+  const chainMult = 1 + m.chain_step * Math.min(row.chains.length, m.chain_cap);
+  const base = Math.pow(row.tvl_usd, m.tvl_exponent) * m.scale;
+  const implied = Math.max(1, Math.round(base * growthMult * ageMult * chainMult));
+  return { implied, base: Math.round(base), growthPct, growthMult, ageMult, chainMult, age };
 }
+
+// ---------------------------------------------------------------- farm plans
+
+/** How much capital one farm position needs, from the protocol's own TVL. */
+function capitalFor(row) {
+  if (row.tvl_usd >= 1000000000) return 250;
+  if (row.tvl_usd >= 100000000) return 100;
+  return 50;
+}
+
+/** The gas budget for the main position, from its capital tier. */
+function gasFor(capital) {
+  if (capital >= 250) return 5;
+  if (capital >= 100) return 3;
+  return 1;
+}
+
+/** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
 function holdDaysFor(age) {
-  if (age < 180) return 30;
-  if (age < 730) return 45;
-  return 60;
+  if (age < 180) return 60;
+  if (age < 365) return 45;
+  return 30;
 }
+
+/** The first chain a protocol names, or a neutral phrase. */
+function chainOf(row) { return row.chains.length > 0 ? row.chains[0] : 'its main chain'; }
+
+/** The category's one action, in the words a farmer can follow. */
+function actionFor(row, capital, chain) {
+  const c = (row.category || '').toLowerCase();
+  const name = row.name;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Lend $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
+  if (c.includes('dex')) return `Add $${capital} of liquidity to ${name}'s main pool on ${chain} and leave it in place.`;
+  if (c.includes('yield') || c.includes('leveraged') || c.includes('farm')) return `Deposit $${capital} into ${name}'s main yield position on ${chain} and leave it earning.`;
+  if (c.includes('curator') || c.includes('allocator') || c.includes('liquidity manager')) return `Deposit $${capital} into a ${name} vault on ${chain} and hold the shares.`;
+  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
+  if (c.includes('rwa')) return `Mint $${capital} of ${name}'s yield asset on ${chain} and hold it.`;
+  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('basis')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
+  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
+  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds inside its app.`;
+  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
+  if (c.includes('btc')) return `Deposit $${capital} of the BTC-backed asset into ${name} on ${chain} and hold it.`;
+  return `Deposit $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
+}
+
+/**
+ * A protocol's farm plan: six steps, each an action with a cost and a time, from the
+ * protocol's own record (category, chains, TVL, age). The same templates build the board's
+ * farm steps, so the detail panel shows exactly what the board carries.
+ */
 function farmSteps(row) {
-  const chains = row.ch ? row.ch.split(',') : [];
-  const mainChain = chains.length > 0 ? chains[0] : 'its main chain';
-  const action = row.c !== null ? (CATEGORY_ACTIONS[row.c] || DEFAULT_ACTION) : DEFAULT_ACTION;
-  const capital = capitalFor(row.t);
-  const gas = CHAIN_GAS_USD[mainChain] || 3;
-  const hold = holdDaysFor(row.a);
-  const venue = row.c === null ? 'venue' : row.c + ' venue';
+  const chain = chainOf(row);
+  const capital = capitalFor(row);
+  const hold = holdDaysFor(ageOf(row));
+  const action = actionFor(row, capital, chain);
   return [
-    'Use ' + row.n + ' on ' + mainChain + ' as a ' + venue + ': ' + action + '. Start with the smallest position the venue accepts and confirm the transaction settles before adding more.',
-    'Fund the position with $' + capital + '. That size matches the protocol\'s TVL tier (under $100M gets $50, $100M to $1B gets $100, over $1B gets $250). Keep the rest of your farming budget in stables until the first week settles.',
-    'Do the work on ' + mainChain + ' first — it is the protocol\'s main chain. Budget about $' + gas + ' for gas across the week\'s transactions; if gas spikes, wait for a quiet hour instead of paying a premium.',
-    'Check the position once a week: confirm the TVL is still growing, the 7-day change has not collapsed, and no token has been announced. Rebalance only if one leg of the plan stops working.',
-    'Hold the position for ' + hold + ' days — the hold scales with how long the protocol has been listed (under 6 months gets 30 days, 6 to 24 months gets 45, over 24 months gets 60). Do not chase a token announcement; the farm is the position and any token is a bonus.',
-    'Claim anything only from the protocol\'s official site and its official social accounts — never from a link in a direct message or a reply. Keep a farm log: the date, the chain, the amount in, the amount out, and the transaction hash of every step.',
+    { text: `Set up a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`, cost: `$3 of gas at most for the first transaction`, time: `5 minutes` },
+    { text: action, cost: `$${capital} of capital and about $${gasFor(capital)} of gas`, time: `15 minutes to set up` },
+    { text: `Do one qualifying action every week \u2014 a deposit, a borrow, a swap or a vote \u2014 so the wallet stays active.`, cost: `about $2 of gas a week`, time: `10 minutes a week` },
+    { text: `Hold the position for at least ${hold} days so the activity spans more than one snapshot.`, cost: `the $${capital} stays in the position`, time: `${hold} days` },
+    { text: `Before withdrawing, open ${row.name}'s own points or rewards page and claim only through the link it publishes.`, cost: `$0 to check, and never pay to claim`, time: `10 minutes` },
+    { text: `Record the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it cleanly.`, cost: `$0 in fees, only the log to keep`, time: `5 minutes` },
   ];
 }
 
-// ------------------------------------------------------------------ state
+/** A step as one string: its action, then its cost and time. */
+function stepText(step) { return `${step.text} Cost: ${step.cost} \u00b7 Time: ${step.time}.`; }
 
-const state = { q: '', cat: '', chain: '', watch: false, sortKey: 'rank', sortDir: 1, tab: 'board', detail: null };
-const sandbox = { exp: 0.8, scale: 8, growth: 0.6, ageSpan: 0.5, chainW: 0.015, active: false };
+// ---------------------------------------------------------------- formatting
 
-const tbody = document.querySelector('table.board tbody');
-const countEl = document.getElementById('count');
-const detailEl = document.getElementById('detail');
-
-function sandboxValue(row) {
-  const nChains = row.ch ? row.ch.split(',').length : 0;
-  const g = clamp((row.g === null ? 0 : row.g) / 100, -0.5, 1.5);
-  return Math.pow(row.t, sandbox.exp) * sandbox.scale
-    * (1 + g * sandbox.growth)
-    * (0.7 + Math.min(row.a, 1460) / 1460 * sandbox.ageSpan)
-    * (1 + sandbox.chainW * Math.min(nChains, 10));
+function fmtMoney(v) {
+  if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return '$' + Math.round(v / 1e6) + 'M';
+  if (v >= 1e3) return '$' + Math.round(v / 1e3) + 'K';
+  return '$' + Math.round(v);
 }
-function displayValue(row) {
-  return sandbox.active ? sandboxValue(row) : row.v;
+function fmtPct(v) { return v === null || v === undefined ? '\u2014' : (v > 0 ? '+' : '') + v.toFixed(1) + '%'; }
+function fmtAge(row) { const a = row.age_days; return a === null || a === undefined ? '\u2014' : a + 'd'; }
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+// ---------------------------------------------------------------- board
+
+const tbody = document.getElementById('rows');
+const state = { q: '', cat: '', chain: '', watch: false, sort: 'rank', dir: 1, view: 'board' };
+
+function sortValue(row, key) {
+  if (key === 'chains') return row.chains.length;
+  if (key === 'age_days') return ageOf(row);
+  return row[key];
 }
 
 function filteredRows() {
   const q = state.q.trim().toLowerCase();
-  let list = rows.filter((r) => {
-    if (state.watch && !r.w) return false;
-    if (state.cat && r.c !== state.cat) return false;
-    if (state.chain) {
-      const chains = r.ch ? r.ch.split(',') : [];
-      if (!chains.includes(state.chain)) return false;
-    }
-    if (q && r.n.toLowerCase().indexOf(q) < 0 && r.s.toLowerCase().indexOf(q) < 0) return false;
+  let list = ROWS.filter((r) => {
+    if (state.watch && !r.watch) return false;
+    if (state.cat && r.category !== state.cat) return false;
+    if (state.chain && !r.chains.includes(state.chain)) return false;
+    if (q && !(r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q))) return false;
     return true;
   });
-  const key = state.sortKey;
-  const dir = state.sortDir;
-  const val = (r) => {
-    if (key === 'rank') return displayValue(r);
-    if (key === 'name') return r.n;
-    if (key === 'category') return r.c || '';
-    if (key === 'tvl') return r.t;
-    if (key === 'change') return r.g === null ? 0 : r.g;
-    if (key === 'age') return r.a;
-    if (key === 'chains') return r.ch ? r.ch.split(',').length : 0;
-    if (key === 'value') return displayValue(r);
-    return r.r;
-  };
-  list = list.slice().sort((a, b) => {
-    const va = val(a), vb = val(b);
-    if (typeof va === 'string') return va.localeCompare(vb) * dir;
-    return (va - vb) * dir;
+  const key = state.sort;
+  list = [...list].sort((a, b) => {
+    const av = sortValue(a, key), bv = sortValue(b, key);
+    if (typeof av === 'string') return av.localeCompare(bv) * state.dir;
+    return (av - bv) * state.dir;
   });
-  // Rank and value always sort highest first, whatever the toggle says.
-  if (key === 'rank' || key === 'value') list.sort((a, b) => displayValue(b) - displayValue(a));
   return list;
 }
 
 function renderBoard() {
   const list = filteredRows();
-  tbody.textContent = '';
-  const frag = document.createDocumentFragment();
-  list.forEach((r, i) => {
-    const tr = document.createElement('tr');
-    if (state.detail === r.s) tr.className = 'selected';
-    tr.addEventListener('click', () => openDetail(r.s));
-    const cells = [
-      [String(sandbox.active ? i + 1 : r.r), 'num'],
-      [r.n, ''],
-      [r.c || '—', ''],
-      [fmtMoney(r.t), 'num'],
-      [fmtChange(r.g), 'num ' + (r.g === null ? '' : r.g >= 0 ? 'up' : 'down')],
-      [fmtAge(r.a), 'num'],
-      [String(r.ch ? r.ch.split(',').length : 0) + (r.ch ? ' · ' + r.ch.split(',')[0] : ''), 'num'],
-      [fmtMoney(displayValue(r)), 'num'],
-      [r.w ? '★' : '', 'watch-star'],
-    ];
-    for (const [text, cls] of cells) {
-      const td = document.createElement('td');
-      td.textContent = text;
-      if (cls) td.className = cls;
-      tr.appendChild(td);
-    }
-    frag.appendChild(tr);
-  });
-  tbody.appendChild(frag);
-  countEl.textContent = list.length + ' of ' + rows.length + ' protocols shown'
-    + (sandbox.active ? ' — sandbox model active (re-ranked live)' : '')
-    + ' · snapshot ' + R.as_of;
-}
-
-function renderDetail() {
-  const r = state.detail ? bySlug.get(state.detail) : null;
-  if (!r) { detailEl.hidden = true; detailEl.textContent = ''; return; }
-  detailEl.hidden = false;
-  detailEl.textContent = '';
-  detailEl.appendChild(el('h2', '#' + r.r + ' — ' + r.n));
-  detailEl.appendChild(el('p', (r.c || 'Uncategorized') + ' · records no token' + (r.w ? ' · on the watchlist' : ''), 'meta'));
-  detailEl.appendChild(el('h3', 'Implied value: ' + fmtMoney(displayValue(r))));
-  const dl = document.createElement('dl');
-  const pairs = [
-    ['TVL', fmtMoney(r.t)],
-    ['7-day change', fmtChange(r.g) + '  →  growth factor ' + r.f[0].toFixed(3)],
-    ['Age listed', fmtAge(r.a) + '  →  age factor ' + r.f[1].toFixed(3)],
-    ['Chains', (r.ch ? r.ch.split(',').length : 0) + ' (' + (r.ch || '—') + ')  →  chain factor ' + r.f[2].toFixed(3)],
-    ['Model', R.model],
-  ];
-  for (const [k, v] of pairs) {
-    dl.appendChild(el('dt', k));
-    dl.appendChild(el('dd', v));
-  }
-  detailEl.appendChild(dl);
-  detailEl.appendChild(el('h3', 'Farm plan — six steps'));
-  const ol = document.createElement('ol');
-  for (const step of farmSteps(r)) ol.appendChild(el('li', step));
-  detailEl.appendChild(ol);
-}
-
-function openDetail(slug) {
-  state.detail = slug;
-  renderBoard();
-  renderDetail();
-  writeHash();
-  detailEl.scrollIntoView({ block: 'nearest' });
-}
-
-function renderLive() {
-  const liveBody = document.querySelector('#live-table tbody');
-  liveBody.textContent = '';
-  R.live.forEach((p, i) => {
-    const tr = document.createElement('tr');
-    const ratio = p.t > 0 ? (p.m / p.t).toFixed(2) + 'x' : '—';
-    for (const [text, cls] of [
-      [String(i + 1), 'num'], [p.n, ''], [p.c || '—', ''],
-      [fmtMoney(p.t), 'num'], [fmtMoney(p.m), 'num'], [ratio, 'num'],
-    ]) {
-      const td = document.createElement('td');
-      td.textContent = text;
-      if (cls) td.className = cls;
-      tr.appendChild(td);
-    }
-    liveBody.appendChild(tr);
+  const max = list.length ? Math.max(...list.map((r) => r.implied_value_usd)) : 1;
+  tbody.innerHTML = list.map((r) => {
+    const pct = r.change_7d === null ? null : r.change_7d;
+    const cls = pct === null ? '' : pct >= 0 ? 'up' : 'down';
+    const w = Math.max(2, Math.round((r.implied_value_usd / max) * 100));
+    return `<tr data-slug="${esc(r.slug)}"><td>${r.rank}</td>` +
+      `<td>${esc(r.name)}${r.watch ? ' <span class="star" title="On the watchlist">\u2605</span>' : ''}</td>` +
+      `<td>${esc(r.category || '\u2014')}</td>` +
+      `<td class="num">${fmtMoney(r.tvl_usd)}</td>` +
+      `<td class="num ${cls}">${fmtPct(pct)}</td>` +
+      `<td class="num">${fmtAge(r)}</td>` +
+      `<td class="num">${r.chains.length}</td>` +
+      `<td class="num"><span class="bar-wrap"><span class="bar" style="width:${w}%"></span></span>${fmtMoney(r.implied_value_usd)}</td></tr>`;
+  }).join('');
+  document.getElementById('count').textContent = `${list.length} of ${ROWS.length} rows shown \u00b7 \u2605 on the watchlist`;
+  document.querySelectorAll('.board thead th[data-sort]').forEach((th) => {
+    th.classList.toggle('sorted', th.dataset.sort === state.sort);
   });
 }
 
-function renderSandboxNote() {
-  const top = rows.slice().sort((a, b) => sandboxValue(b) - sandboxValue(a))[0];
-  document.getElementById('sandbox-note').textContent =
-    'Top pick under the current sliders: ' + top.n + ' at ' + fmtMoney(sandboxValue(top))
-    + ' (published model: ' + rows[0].n + ' at ' + fmtMoney(rows[0].v) + ').';
-}
-
-// ------------------------------------------------------------------- tabs
-
-function showTab(tab) {
-  state.tab = tab;
-  document.querySelectorAll('.tabs button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.tab === tab);
-  });
-  document.getElementById('tab-board').hidden = tab !== 'board';
-  document.getElementById('tab-live').hidden = tab !== 'live';
-  document.getElementById('tab-model').hidden = tab !== 'model';
-  if (tab === 'live') renderLive();
-  if (tab === 'model') renderSandboxNote();
-  writeHash();
-}
-document.querySelectorAll('.tabs button').forEach((b) => {
-  b.addEventListener('click', () => showTab(b.dataset.tab));
+tbody.addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-slug]');
+  if (tr) openDetail(tr.dataset.slug);
 });
 
-// ---------------------------------------------------------------- filters
-
-const qInput = document.getElementById('q');
-const catSelect = document.getElementById('cat');
-const chainSelect = document.getElementById('chain');
-const watchBox = document.getElementById('watch');
-
-for (const c of [...new Set(rows.map((r) => r.c).filter(Boolean))].sort()) {
-  catSelect.appendChild(el('option', c));
-}
-for (const c of [...new Set(rows.flatMap((r) => (r.ch ? r.ch.split(',') : [])))].sort()) {
-  chainSelect.appendChild(el('option', c));
-}
-qInput.addEventListener('input', () => { state.q = qInput.value; renderBoard(); writeHash(); });
-catSelect.addEventListener('change', () => { state.cat = catSelect.value; renderBoard(); writeHash(); });
-chainSelect.addEventListener('change', () => { state.chain = chainSelect.value; renderBoard(); writeHash(); });
-watchBox.addEventListener('change', () => { state.watch = watchBox.checked; renderBoard(); writeHash(); });
-
-document.querySelectorAll('table.board th[data-sort]').forEach((th) => {
+document.querySelectorAll('.board thead th[data-sort]').forEach((th) => {
   th.addEventListener('click', () => {
     const key = th.dataset.sort;
-    if (state.sortKey === key) state.sortDir = -state.sortDir;
-    else { state.sortKey = key; state.sortDir = 1; }
+    if (state.sort === key) state.dir = -state.dir;
+    else { state.sort = key; state.dir = key === 'name' || key === 'category' ? 1 : -1; }
     renderBoard();
   });
 });
 
-// -------------------------------------------------------------- sandbox
+// ---------------------------------------------------------------- filters + tabs + hash state
 
-function bindSlider(id, valId, fmt, apply) {
-  const input = document.getElementById(id);
-  const val = document.getElementById(valId);
-  input.addEventListener('input', () => {
-    apply(parseFloat(input.value));
-    val.textContent = fmt(parseFloat(input.value));
-    sandbox.active = true;
-    renderBoard();
-    renderSandboxNote();
-    if (state.detail) renderDetail();
-  });
+const qEl = document.getElementById('q');
+const catEl = document.getElementById('cat');
+const chainEl = document.getElementById('chain');
+const watchEl = document.getElementById('watch');
+
+[...new Set(ROWS.map((r) => r.category).filter(Boolean))].sort().forEach((c) => {
+  catEl.insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
+});
+[...new Set(ROWS.flatMap((r) => r.chains))].sort().forEach((c) => {
+  chainEl.insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
+});
+
+function syncHash() {
+  const h = new URLSearchParams();
+  if (state.q) h.set('q', state.q);
+  if (state.cat) h.set('cat', state.cat);
+  if (state.chain) h.set('chain', state.chain);
+  if (state.watch) h.set('watch', '1');
+  if (state.view !== 'board') h.set('view', state.view);
+  const d = document.getElementById('detail');
+  if (!d.hidden) h.set('detail', d.dataset.slug || '');
+  history.replaceState(null, '', '#' + h.toString());
 }
-bindSlider('sb-exp', 'exp-val', (v) => v.toFixed(2), (v) => { sandbox.exp = v; });
-bindSlider('sb-scale', 'scale-val', (v) => String(v), (v) => { sandbox.scale = v; });
-bindSlider('sb-growth', 'growth-val', (v) => v.toFixed(2), (v) => { sandbox.growth = v; });
-bindSlider('sb-age', 'age-val', (v) => v.toFixed(2), (v) => { sandbox.ageSpan = v; });
-bindSlider('sb-chain', 'chain-val', (v) => v.toFixed(3), (v) => { sandbox.chainW = v; });
-document.getElementById('sb-reset').addEventListener('click', () => {
-  sandbox.exp = 0.8; sandbox.scale = 8; sandbox.growth = 0.6; sandbox.ageSpan = 0.5; sandbox.chainW = 0.015;
-  sandbox.active = false;
-  document.getElementById('sb-exp').value = '0.8';
-  document.getElementById('sb-scale').value = '8';
-  document.getElementById('sb-growth').value = '0.6';
-  document.getElementById('sb-age').value = '0.5';
-  document.getElementById('sb-chain').value = '0.015';
-  document.getElementById('exp-val').textContent = '0.80';
-  document.getElementById('scale-val').textContent = '8';
-  document.getElementById('growth-val').textContent = '0.60';
-  document.getElementById('age-val').textContent = '0.50';
-  document.getElementById('chain-val').textContent = '0.015';
+
+function applyHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  state.q = h.get('q') || '';
+  state.cat = h.get('cat') || '';
+  state.chain = h.get('chain') || '';
+  state.watch = h.get('watch') === '1';
+  state.view = h.get('view') || 'board';
+  qEl.value = state.q; catEl.value = state.cat; chainEl.value = state.chain; watchEl.checked = state.watch;
+  showView(state.view);
   renderBoard();
-  renderSandboxNote();
-  if (state.detail) renderDetail();
+  const slug = h.get('detail');
+  if (slug && ROWS.some((r) => r.slug === slug)) openDetail(slug, true);
+}
+
+qEl.addEventListener('input', () => { state.q = qEl.value; renderBoard(); syncHash(); });
+catEl.addEventListener('change', () => { state.cat = catEl.value; renderBoard(); syncHash(); });
+chainEl.addEventListener('change', () => { state.chain = chainEl.value; renderBoard(); syncHash(); });
+watchEl.addEventListener('change', () => { state.watch = watchEl.checked; renderBoard(); syncHash(); });
+
+function showView(view) {
+  state.view = view;
+  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
+  document.getElementById('view-board').hidden = view !== 'board';
+  document.getElementById('view-live').hidden = view !== 'live';
+  document.getElementById('view-sandbox').hidden = view !== 'sandbox';
+  if (view === 'sandbox') renderSandbox();
+}
+document.querySelectorAll('.tabs button').forEach((b) => {
+  b.addEventListener('click', () => { showView(b.dataset.view); syncHash(); });
 });
 
-// ------------------------------------------------------------------- hash
+// ---------------------------------------------------------------- live tokens
 
-function writeHash() {
-  const parts = [];
-  if (state.tab !== 'board') parts.push('view=' + state.tab);
-  if (state.q) parts.push('q=' + encodeURIComponent(state.q));
-  if (state.cat) parts.push('cat=' + encodeURIComponent(state.cat));
-  if (state.chain) parts.push('chain=' + encodeURIComponent(state.chain));
-  if (state.watch) parts.push('watch=1');
-  if (state.detail) parts.push('detail=' + encodeURIComponent(state.detail));
-  history.replaceState(null, '', parts.length ? '#' + parts.join('&') : location.pathname + location.search);
+document.getElementById('live-rows').innerHTML = LIVE.map((p) => {
+  const pct = p.change_7d === null ? null : p.change_7d;
+  const cls = pct === null ? '' : pct >= 0 ? 'up' : 'down';
+  return `<tr><td>${esc(p.name)}</td><td>${esc(p.category || '\u2014')}</td>` +
+    `<td class="num">${fmtMoney(p.tvl_usd)}</td><td class="num">${p.mcap_usd ? fmtMoney(p.mcap_usd) : '\u2014'}</td>` +
+    `<td class="num ${cls}">${fmtPct(pct)}</td></tr>`;
+}).join('');
+
+// ---------------------------------------------------------------- detail slide-over
+
+const panel = document.getElementById('detail');
+const panelBody = document.getElementById('detail-body');
+
+function openDetail(slug, quiet) {
+  const row = ROWS.find((r) => r.slug === slug);
+  if (!row) return;
+  const f = impliedValue(row, MODEL);
+  const steps = farmSteps(row);
+  panelBody.innerHTML =
+    `<h2>${esc(row.name)}</h2>` +
+    `<p class="rank-line">#${row.rank} &middot; ${esc(row.category || 'no category')} &middot; ${row.chains.length} chain${row.chains.length === 1 ? '' : 's'}${row.watch ? ' &middot; <span class="star">\u2605 on the watchlist</span>' : ''}</p>` +
+    `<p class="implied-big">${fmtMoney(row.implied_value_usd)} implied</p>` +
+    `<h3>How the value is built</h3>` +
+    `<table class="factors"><tbody>` +
+    `<tr><td>TVL ${fmtMoney(row.tvl_usd)}</td><td>TVL<sup>0.8</sup> &times; 8 = ${fmtMoney(f.base)}</td></tr>` +
+    `<tr><td>7-day change ${fmtPct(row.change_7d)}</td><td>&times; ${f.growthMult.toFixed(3)} growth</td></tr>` +
+    `<tr><td>Age ${f.age} days</td><td>&times; ${f.ageMult.toFixed(3)} patience</td></tr>` +
+    `<tr><td>${row.chains.length} chain${row.chains.length === 1 ? '' : 's'} (${esc(row.chains.slice(0, 3).join(', '))}${row.chains.length > 3 ? ', \u2026' : ''})</td><td>&times; ${f.chainMult.toFixed(3)} reach</td></tr>` +
+    `<tr class="total"><td>Implied value</td><td>${fmtMoney(row.implied_value_usd)}</td></tr>` +
+    `</tbody></table>` +
+    `<p class="nonames">implied = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; growth) &times; (0.6 + 0.7 &times; age) &times; (1 + 0.015 &times; chains)</p>` +
+    `<h3>Farm plan &mdash; six steps</h3>` +
+    `<ol class="farm">` + steps.map((s) => `<li>${esc(s.text)}<span class="cost">Cost: ${esc(s.cost)} \u00b7 Time: ${esc(s.time)}.</span></li>`).join('') + `</ol>`;
+  panel.dataset.slug = slug;
+  panel.hidden = false;
+  if (!quiet) syncHash();
 }
-function readHash() {
-  const hash = location.hash.replace(/^#/, '');
-  if (!hash) return;
-  for (const part of hash.split('&')) {
-    const [k, v] = part.split('=');
-    const val = v === undefined ? '' : decodeURIComponent(v);
-    if (k === 'view' && (val === 'board' || val === 'live' || val === 'model' || val === 'detail' || val === 'filtered')) {
-      state.tab = val === 'detail' || val === 'filtered' ? 'board' : val;
-    }
-    if (k === 'q') { state.q = val; qInput.value = val; }
-    if (k === 'cat') { state.cat = val; catSelect.value = val; }
-    if (k === 'chain') { state.chain = val; chainSelect.value = val; }
-    if (k === 'watch') state.watch = val === '1';
-    if (k === 'detail' && bySlug.has(val)) state.detail = val;
-  }
-  watchBox.checked = state.watch;
+
+document.getElementById('detail-close').addEventListener('click', () => {
+  panel.hidden = true;
+  delete panel.dataset.slug;
+  syncHash();
+});
+
+// ---------------------------------------------------------------- model sandbox
+
+function renderSandbox() {
+  const gw = parseFloat(document.getElementById('gw').value);
+  const a1 = parseFloat(document.getElementById('a1').value);
+  const exp = parseFloat(document.getElementById('exp').value);
+  document.getElementById('gw-val').textContent = gw.toFixed(2);
+  document.getElementById('a1-val').textContent = a1.toFixed(2);
+  document.getElementById('exp-val').textContent = exp.toFixed(2);
+  const m = { ...MODEL, growth_weight: gw, age_range: a1, tvl_exponent: exp };
+  const ranked = ROWS.map((r) => ({ row: r, v: impliedValue(r, m).implied }))
+    .sort((a, b) => b.v - a.v || a.row.rank - b.row.rank)
+    .slice(0, 10);
+  document.getElementById('sandbox-rows').innerHTML = ranked.map((x, i) =>
+    `<tr><td>${i + 1}</td><td>${esc(x.row.name)}</td><td class="num">${fmtMoney(x.v)}</td><td class="num">was #${x.row.rank}</td></tr>`
+  ).join('');
 }
+['gw', 'a1', 'exp'].forEach((id) => document.getElementById(id).addEventListener('input', renderSandbox));
 
-// ------------------------------------------------------------------- init
+// ---------------------------------------------------------------- stats + start
 
-document.getElementById('model-line').textContent = R.model;
-readHash();
-showTab(state.tab);
+document.getElementById('stat-watch').textContent = `${RADAR.watchlist_size}/${RADAR.watchlist_size}`;
+document.getElementById('stat-rows').textContent = String(RADAR.board_size);
+document.getElementById('stat-date').textContent = RADAR.as_of;
+document.getElementById('stat-model').textContent = RADAR.model_version;
+
 renderBoard();
-renderDetail();
+applyHash();
