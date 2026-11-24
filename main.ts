@@ -1,16 +1,13 @@
-// main.ts — the token-radar entrypoint (Node 22, standard library only).
+// Token Launch Radar, model radar-4 (Node 22, standard library only).
 //
-// Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every pre-token protocol with the model in lib/model.ts, writes the
-// ranked board to /output/board.json and the dashboard's data to
-// /output/data.js, copies this repository's dashboard/ and screenshots/ to
-// /output, and writes /output/dossier.json with the vendored make.fun
-// library. The scorer rebuilds that dossier from the same /output and
-// compares bytes, so the dossier is written last and only when the three
-// screenshots are in place.
+// Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
+// pre-token protocol the house rule admits with the model in lib/model.ts, writes the ranked
+// board to /output/board.json and the dashboard's data to /output/data.js, copies this
+// repository's dashboard/ and screenshots/ to /output, and writes /output/dossier.json with
+// the vendored make.fun library — the summary the judge reads.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../kit/token-radar-01-kit/input/snapshot.json
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,7 +17,7 @@ import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
-/** The scorer's own caps (reference/gate.json): the text cap shapes the bytes, the rest refuse. */
+/** The scorer's own caps: the text cap shapes the bytes, the rest refuse. */
 const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
@@ -42,23 +39,24 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const result = buildRadar(snapshot);
-const issue = boardIssue(result.board, snapshot);
+const { board, radar } = buildRadar(snapshot);
+const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
   process.exit(1);
 }
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: result.board })}\n`);
-writeFileSync(join(out, 'data.js'), dataScript(result, snapshot));
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+writeFileSync(join(out, 'data.js'), dataScript(radar));
 
-/** Copy one directory's regular files into `to`, skipping names that start with a dot. */
+/** Copy one directory's regular files into `to`, skipping names that start with a dot.
+ *  Names are copied in sorted order, so two runs write the same bytes. */
 function copyFiles(from: string, to: string): string[] {
   if (!existsSync(from)) return [];
   mkdirSync(to, { recursive: true });
   const copied: string[] = [];
-  for (const name of readdirSync(from)) {
+  for (const name of readdirSync(from).sort()) {
     if (name.startsWith('.')) continue;
     const path = join(from, name);
     if (!statSync(path).isFile()) continue;
@@ -69,11 +67,11 @@ function copyFiles(from: string, to: string): string[] {
 }
 
 const dashFiles = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
-const hasHtml = dashFiles.includes('index.html');
-const hasCss = dashFiles.some((f) => f.endsWith('.css'));
-const hasJs = dashFiles.some((f) => f.endsWith('.js'));
-if (!hasHtml || !hasCss || !hasJs) {
-  process.stderr.write(`token radar: dashboard/ needs index.html plus a .css and a .js file (has html=${hasHtml} css=${hasCss} js=${hasJs})\n`);
+// The judge reads the dashboard's source, capped at TEXT_MAX_BYTES: refuse a build that
+// would hand it a cut-off file, and say how much of the cap the page uses.
+const dashBytes = dashFiles.reduce((n, f) => n + statSync(join(out, 'dashboard', f)).size, 0);
+if (dashBytes > TEXT_MAX_BYTES) {
+  process.stderr.write(`token radar: dashboard/ is ${dashBytes} bytes, over the ${TEXT_MAX_BYTES} the judge reads: trim the page before submitting\n`);
   process.exit(1);
 }
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
@@ -92,6 +90,6 @@ for (const name of shots) {
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${result.board.length} rows scored (${result.early_size} early, ${result.live_size} live set aside)\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
