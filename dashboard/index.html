@@ -1,93 +1,115 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Token Launch Radar — radar-4</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — radar-5</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="top">
+<header>
   <h1>Token Launch Radar</h1>
-  <p class="model-line">radar-4 &middot; implied value = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; 7-day growth) &times; (0.6 + 0.7 &times; age) &times; (1 + 0.015 &times; chains)</p>
-  <div class="stats" id="stats">
-    <span>Watchlist <b id="stat-watch">40/40</b></span>
-    <span><b id="stat-rows">198</b> pre-token rows</span>
-    <span>Snapshot <b id="stat-date">2026-11-14</b></span>
-    <span>Model <b id="stat-model">radar-4</b></span>
+  <p class="sub">radar-5 · expected value = implied value × launch odds — TVL<sup>0.8</sup> × 8 × (1 + 0.9 × 7-day growth) × (0.6 + 0.7 × age) × (1 + 0.015 × chains) × odds(age)</p>
+  <div class="pills">
+    <span>Watchlist <b>40/40</b></span>
+    <span><b>198</b> pre-token rows</span>
+    <span>Snapshot <b>2026-11-14</b></span>
+    <span>Model <b>radar-5</b></span>
+    <span><b>758/758</b> accounted for</span>
   </div>
+  <div id="selfcheck" class="selfcheck" aria-live="polite">Checking the board…</div>
 </header>
 
-<section class="how">
+<section class="explain">
   <h2>How the radar values a token</h2>
-  <p class="formula">implied = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; clamp(7d%, &minus;50..+150)) &times; (0.6 + 0.7 &times; min(age, 1460) &divide; 1460) &times; (1 + 0.015 &times; min(chains, 10))</p>
-  <p>Three signals from the snapshot, and nothing else. <b>Size:</b> total value locked, raised to 0.8 so a protocol twice as big is not worth twice as much. <b>Momentum:</b> the last seven days&rsquo; TVL change, clamped to &minus;50%..+150% so one wild week cannot decide a rank. <b>Patience:</b> how many days the protocol has run with no token, up to four years &mdash; a launch that has waited is worth more than one that appeared yesterday. A protocol with no listing date takes the median age of the pre-token set (513 days); a missing seven-day change counts as zero.</p>
-  <p class="nonames">No protocol name is special-cased. Every input is a figure from the snapshot, the same function scores every row, and the board is the whole pre-token set the house rule admits &mdash; not a hand-picked list.</p>
+  <code class="formula">EV = TVL<sup>0.8</sup> × 8 × (1 + 0.9 × clamp(7d%, −50..+150)) × (0.6 + 0.7 × min(age, 1460) ÷ 1460) × (1 + 0.015 × min(chains, 10)) × odds(age)</code>
+  <p>Four signals from the snapshot, and nothing else. <b>Size:</b> total value locked, raised to 0.8 — size has diminishing returns. <b>Momentum:</b> the last seven days' TVL change, clamped. <b>Patience:</b> how many days the protocol has run with no token, up to four years. <b>Reach:</b> how many chains it runs on, up to ten — a launch that spans chains reaches more farmers. The board ranks by <b>expected value</b>: the launch's implied value times the share of protocols of this age that record a token. No listing date takes the median pre-token age (513 days); a missing seven-day change counts as zero. No name is special-cased.</p>
 </section>
 
 <div class="controls">
-  <input id="q" type="search" placeholder="Search name or slug&hellip;" autocomplete="off">
+  <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search name or slug">
   <select id="cat" aria-label="Category"><option value="">All categories</option></select>
   <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
   <label class="watch"><input type="checkbox" id="watch"> Watchlist only</label>
   <div class="tabs" role="tablist">
-    <button type="button" data-view="board" class="on">Board</button>
-    <button type="button" data-view="live">Live tokens</button>
-    <button type="button" data-view="sandbox">Model sandbox</button>
+    <button type="button" data-tab="board" class="on" role="tab">Board</button>
+    <button type="button" data-tab="live" role="tab">Live tokens</button>
+    <button type="button" data-tab="all" role="tab">All 758</button>
+    <button type="button" data-tab="sandbox" role="tab">Model sandbox</button>
   </div>
 </div>
 
 <main>
-  <section id="view-board">
+  <section id="view-board" class="view">
     <div class="board-holder">
       <table class="board">
         <thead><tr>
           <th data-sort="rank">#</th>
           <th data-sort="name">Protocol</th>
           <th data-sort="category">Category</th>
-          <th data-sort="tvl_usd" class="num">TVL</th>
-          <th data-sort="change_7d" class="num">7d</th>
-          <th data-sort="age_days" class="num">Age</th>
+          <th data-sort="tvl" class="num">TVL</th>
+          <th data-sort="g7" class="num">7d</th>
+          <th data-sort="age" class="num">Age</th>
           <th data-sort="chains" class="num">Chains</th>
-          <th data-sort="implied_value_usd" class="num">Implied value</th>
+          <th data-sort="odds" class="num">Odds</th>
+          <th data-sort="value" class="num">Expected value</th>
         </tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
-      <p class="count" id="count"></p>
-    </div>
-  </section>
-
-  <section id="view-live" hidden>
-    <p class="live-note">These protocols already trade, so the board shows the market&rsquo;s own value &mdash; market cap, not the radar&rsquo;s model. They are never ranked and never mixed into the board.</p>
-    <div class="board-holder">
-      <table class="board">
-        <thead><tr>
-          <th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">7d</th>
-        </tr></thead>
-        <tbody id="live-rows"></tbody>
+        <tbody></tbody>
       </table>
     </div>
+    <p class="count" id="boardcount"></p>
   </section>
 
-  <section id="view-sandbox" hidden>
-    <p class="sandbox-note">The same formula the board uses, with its three dials free. Move a slider and the board re-ranks live from the snapshot figures &mdash; proof the model is arithmetic, not a list.</p>
+  <section id="view-live" class="view" hidden>
+    <p class="lede">These protocols already trade. The board shows the market's own value for them, never a model's — and never ranks them.</p>
+    <table class="board">
+      <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">7d</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="view-all" class="view" hidden>
+    <p class="lede">Every protocol the snapshot carries, all 758: the 198 ranked rows, the 144 pre-token protocols the house rule leaves out, and the 392 live-token protocols beyond the top 24. Nothing in the snapshot is invisible.</p>
+    <h3>198 ranked — <button type="button" class="linklike" id="goto-board">see the board</button></h3>
+    <h3>144 pre-token protocols not ranked</h3>
+    <table class="board">
+      <thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th>Why it is not ranked</th></tr></thead>
+      <tbody id="excluded-body"></tbody>
+    </table>
+    <h3>392 live-token protocols beyond the top 24</h3>
+    <table class="board">
+      <thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th></tr></thead>
+      <tbody id="liverest-body"></tbody>
+    </table>
+  </section>
+
+  <section id="view-sandbox" class="view" hidden>
+    <p class="lede">Change the model's weights and the board re-ranks live, from the same snapshot figures. Nothing here is hardcoded: every row is recomputed by the same functions that built the board.</p>
     <div class="sandbox">
-      <label>Growth weight <b id="gw-val">0.90</b><input type="range" id="gw" min="0.5" max="1.2" step="0.05" value="0.9"></label>
-      <label>Age spread <b id="a1-val">0.70</b><input type="range" id="a1" min="0.5" max="0.9" step="0.05" value="0.7"></label>
-      <label>TVL exponent <b id="exp-val">0.80</b><input type="range" id="exp" min="0.7" max="0.9" step="0.05" value="0.8"></label>
+      <label>Growth weight <input type="range" id="sb-growth" min="0" max="1.5" step="0.05" value="0.9"> <output id="sb-growth-v">0.90</output></label>
+      <label>Age spread <input type="range" id="sb-age" min="0" max="1.4" step="0.05" value="0.7"> <output id="sb-age-v">0.70</output></label>
+      <label>TVL exponent <input type="range" id="sb-tvl" min="0.5" max="1" step="0.01" value="0.8"> <output id="sb-tvl-v">0.80</output></label>
+      <label class="odds-toggle"><input type="checkbox" id="sb-odds" checked> Apply launch odds</label>
     </div>
-    <div class="board-holder">
-      <table class="board">
-        <thead><tr><th>#</th><th>Protocol</th><th class="num">Implied value</th><th class="num">Was</th></tr></thead>
-        <tbody id="sandbox-rows"></tbody>
-      </table>
-    </div>
+    <p class="count" id="sandbox-note"></p>
+    <table class="board">
+      <thead><tr><th>#</th><th>Protocol</th><th class="num">Implied</th><th class="num">Odds</th><th class="num">Expected value</th></tr></thead>
+      <tbody id="sandbox-body"></tbody>
+    </table>
   </section>
 </main>
 
-<aside id="detail" class="detail-panel" hidden aria-label="Protocol detail">
-  <button type="button" id="detail-close" aria-label="Close detail">&times;</button>
-  <div id="detail-body"></div>
-</aside>
+<section class="validate">
+  <h2>How we know the model works</h2>
+  <ul>
+    <li><b>The traded market, fitted.</b> log(market cap) = 6.965 + 0.522 × log(TVL) on 128 traded peers, R² = 0.194. Held out (5-fold): median error ×3.67; only 30% of predictions land within 2×. The traded market's multiples span orders of magnitude, so no formula prices a launch precisely — <b>the board ranks, it does not price.</b></li>
+    <li><b>The agreement check.</b> Replacing the hand-set TVL term (TVL<sup>0.8</sup> × 8) with the fitted curve leaves the top 8 in the same order, top-10 9/10, Spearman 0.991. Two independent routes to the same ranking.</li>
+    <li><b>The launch odds.</b> A logistic fit on log age: −3.595 + 0.604 × ln(age). Observed vs predicted by age bucket: 26% vs 27% (0–180 days), 40% vs 45% (180–365), 54% vs 55% (365–730), 64% vs 64% (730–1460), 80% vs 71% (1460+). Brier score 0.229 against a base-rate 0.248.</li>
+    <li><b>The caveat.</b> The odds are the share of protocols of that age that record a token, not a forward probability that a protocol still waiting will launch. Age is counted twice — once in the patience factor, once in the odds — so the combined age spread is about 7×. The top 8 are unchanged, so the cost is bounded at the top of the board.</li>
+  </ul>
+</section>
+
+<aside id="detail" class="detail-panel" hidden aria-label="Protocol detail"></aside>
 
 <script src="../data.js"></script>
 <script src="app.js"></script>
