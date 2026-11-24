@@ -1,15 +1,87 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — pre-token protocols ranked by implied launch value</title>
+<title>Token Radar — pre-token protocols ranked by implied value</title>
 <link rel="stylesheet" href="app.css">
+<script src="data.js"></script>
+<script src="app.js" defer></script>
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<main id="board" tabindex="-1" aria-busy="true"></main>
-<script src="../data.js"></script>
-<script src="app.js"></script>
+<header class="masthead">
+  <div class="masthead-inner">
+    <h1>Token Radar</h1>
+    <p class="tagline">Pre-token protocols, ranked by what their token would be worth — from the snapshot's own figures, not a hardcoded list.</p>
+    <p class="meta" id="meta-line">Loading the board…</p>
+  </div>
+</header>
+
+<main>
+  <section class="controls" aria-label="Filter and sort">
+    <label>Search <input id="q" type="search" placeholder="Name or slug…" autocomplete="off"></label>
+    <label>Category
+      <select id="cat">
+        <option value="">All categories</option>
+      </select>
+    </label>
+    <label class="check"><input id="watch-only" type="checkbox"> Watchlist only</label>
+    <label>Sort by
+      <select id="sort">
+        <option value="value">Implied value</option>
+        <option value="tvl">TVL</option>
+        <option value="growth">7-day growth</option>
+        <option value="age">Age</option>
+        <option value="multiple">Multiple</option>
+      </select>
+    </label>
+    <span class="count" id="count"></span>
+  </section>
+
+  <div class="board-holder">
+    <table class="board">
+      <thead>
+        <tr>
+          <th data-sort="rank">#</th>
+          <th data-sort="name">Protocol</th>
+          <th data-sort="category">Category</th>
+          <th data-sort="tvl" class="num">TVL</th>
+          <th data-sort="growth" class="num">7d</th>
+          <th data-sort="age" class="num">Age</th>
+          <th data-sort="chains" class="num">Chains</th>
+          <th data-sort="multiple" class="num">Multiple</th>
+          <th data-sort="value" class="num">Implied value</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <section class="detail" id="detail" hidden>
+    <h2 id="detail-name"></h2>
+    <p class="detail-sub" id="detail-sub"></p>
+    <div class="detail-grid">
+      <div class="big-value"><span id="detail-value"></span><label>implied value</label></div>
+      <table class="breakdown">
+        <tbody id="detail-model"></tbody>
+      </table>
+    </div>
+    <h3>How to farm it</h3>
+    <ol class="farm" id="detail-steps"></ol>
+    <p class="note">This protocol records no token in the snapshot. That is what the record says — not proof it has none.</p>
+  </section>
+
+  <section class="method">
+    <h2>How the radar values a token that does not exist yet</h2>
+    <p><strong>Implied value = TVL × category multiple × growth × age × chains.</strong></p>
+    <p>The <strong>category multiple</strong> is the traded market's own FDV/TVL for that category: the TVL-weighted ratio of sums over its traded peers, shrunk toward the global multiple (0.082) so a thin category cannot set its own price. A category with fewer than five traded peers falls back to the global multiple. Two hygiene rules keep the multiples honest: versioned deployments are dropped from the peer pool (DefiLlama attributes a token's whole market cap to each versioned deployment — Aave V2 alone, $91M of TVL carrying the whole $1.72B AAVE market cap, pushed the Lending multiple to 2.56 before it was dropped), and any peer with FDV/TVL above 5 is dropped. The multiples this snapshot gives: Dexs 1.00, Lending 0.33, Yield 0.25, Basis Trading 0.16, RWA 0.13, Liquid Staking 0.03, everything thin at the global 0.082.</p>
+    <p><strong>Growth</strong> is 1 + 0.5 × the seven-day TVL change (clamped to −30%…+100%); no change reported means 1. <strong>Age</strong> is 0.85 + 0.45 × days listed (capped at 4 years) ÷ 1460 — a protocol that has run longer with no token has waited longer, and is worth more. <strong>Chains</strong> is 1 + 0.03 × ln(chains). The value is capped at 25× TVL. Every input is a snapshot figure; no protocol name is special-cased, and each row carries its full breakdown so any value can be checked from the snapshot alone.</p>
+    <p>The board ranks the 198 pre-token protocols with the highest implied value. The watchlist — 40 protocols at or above the $50M floor that record no token — is the floor, never the ceiling: the board also ranks the early finds below it. A protocol below the floor, or one the watchlist leaves out, is no worse a subject.</p>
+  </section>
+</main>
+
+<footer>
+  <p>Source: DefiLlama public API, snapshot as of 14 November 2026. Implied values are this radar's own claim, never a prediction that a token will be issued or what it will trade at.</p>
+</footer>
 </body>
 </html>
