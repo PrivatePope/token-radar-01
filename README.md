@@ -1,54 +1,79 @@
-![](https://make.fun/badge/token-radar-01.svg)
-![](https://make.fun/badge/token-radar-01/PrivatePope/token-radar-01/rank.svg)
-![](https://make.fun/badge/token-radar-01/PrivatePope/token-radar-01/reward.svg)
+# token-radar-01
 
-# Token Radar — pre-token protocols ranked by implied value
+![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)
+![rank](https://make.fun/badge/token-radar-01/PrivatePope/token-radar-01/rank.svg)
+![reward](https://make.fun/badge/token-radar-01/PrivatePope/token-radar-01/reward.svg)
 
-A dashboard that finds the protocols whose token does not exist yet, ranks them by what that token would be worth, and shows a reader how to farm each one. Built for the [token-radar-01 bounty on make.fun](https://make.fun/c/token-radar-01).
+A token launch radar: 198 pre-token protocols ranked by implied token value, built for make.fun's
+"Build the best token launch radar" bounty — https://make.fun/bounty/token-radar-01
 
-## The model (radar-3)
+## What it does
+
+`main.ts` (Node 22, standard library only) reads the sealed DefiLlama snapshot
+(758 protocols at or above $5M TVL, as of 2026-11-14), scores every pre-token protocol with the
+model below, and writes the ranked board to `/output/board.json`, the dashboard's data to
+`/output/data.js`, and the judge's dossier to `/output/dossier.json`. The dashboard is a static
+page — sortable and filterable board, a detail view per protocol with the model's full breakdown
+and a six-step farm plan, a live-token reference kept apart from the ranking, and a model sandbox
+that re-ranks the board live from the snapshot figures.
+
+A protocol "records no token" — never "has none". Implied values are this radar's own claim,
+never make.fun's.
+
+## The model (radar-2)
 
 ```
-implied value = TVL × category multiple × growth × age × chains
-  category multiple = the traded market's FDV/TVL for the protocol's category
-                      (TVL-weighted ratio of sums over traded peers, shrunk
-                      toward the global multiple; fewer than 5 traded peers
-                      falls back to the global multiple)
-  growth = 1 + 0.5 × clamp(7-day TVL change, −30%…+100%)
-  age    = 0.85 + 0.45 × min(days listed, 1460) / 1460
-  chains = 1 + 0.03 × ln(chains)
-  multiple clamped to [0.02, 5]; value capped at 25× TVL
+implied = TVL^0.8 x 8 x (1 + 0.6 x clamp(7d%, -50..+150)) x (0.7 + 0.5 x min(ageDays, 1460) / 1460) x (1 + 0.015 x min(chains, 10))
 ```
 
-Every input is a snapshot figure; no protocol name is special-cased. Each board row carries its full breakdown (TVL, category, multiple, 7-day change, age, chains and all three factors) so any implied value can be checked from the snapshot alone.
+Every input is a snapshot figure; no protocol name is special-cased. The TVL term is concave
+(diminishing returns: a protocol twice as big is not worth twice as much). The 7-day TVL change
+is clamped to -50%..+150% and weighted 0.6. Maturity runs 0.7 for a brand-new listing to 1.2
+for one listed 1,460 days or more; a protocol with no listing date takes the median age of the
+pre-token set (513 days). Chain reach adds up to 15% for up to 10 chains.
 
-The multiples this snapshot gives (global 0.082):
+The board ranks every protocol that passes the house watchlist's exclusion rule, without its
+$50M floor: pre-token (both `gecko_id` and `symbol` null), not a wrapped, staked or bridged
+product of a token that already trades (excluded categories, versioned names, exchange names),
+and not a versioned deployment. That is 198 protocols, covering all 40 watchlist slugs.
+Live-token protocols are set aside into a separate reference view and never ranked.
 
-| Category | Multiple | Traded peers |
-| --- | --- | --- |
-| Dexs | 1.00 | 11 |
-| Lending | 0.33 | 13 |
-| Canonical Bridge | 0.31 | 7 |
-| Yield | 0.25 | 13 |
-| Basis Trading | 0.16 | 7 |
-| RWA | 0.13 | 9 |
-| Liquid Staking | 0.03 | 11 |
-| Everything thin | 0.082 (global) | < 5 peers |
+Farm plans are template-generated from each protocol's own record: a category-specific action,
+capital by TVL tier ($50 under $100M, $100 up to $1B, $250 above), the main chain with a gas
+budget, a weekly cadence, a hold of 30–60 days scaled by listing age, and claim safety plus a
+farm log. Six steps each.
 
-## Two hygiene rules that keep the multiples honest
+## The board (top 10)
 
-The peer pool is the snapshot's traded protocols (a recorded token market cap), with two drops. **Versioned deployments are dropped**: DefiLlama attributes a token's whole market cap to each versioned deployment, so Aave V2 — $91M of TVL carrying the whole $1.72B AAVE market cap, while Aave V3 ($14.36B of TVL) records none — pushed the Lending multiple to 2.56 and the top implied value to $2.58B before it was dropped. **Any peer with FDV/TVL above 5 is dropped** (8 of 144): a market cap far above the value locked is not a valuation multiple. After hygiene the pool is 136 peers and the top value is $314M.
-
-## The board
-
-198 rows: every pre-token protocol the snapshot's rule admits (records no token; not a wrapped, staked or bridged product, not an exchange, not a versioned deployment), ranked by implied value. The watchlist — 40 protocols at or above the $50M floor that record no token — is the floor, never the ceiling: the board also ranks the early finds below it. Each row carries six farm steps, generated from its own record (rank-tier position $100/$250/$500, main chain and its gas cost, category action, weekly cadence, 30–60 day hold).
-
-Top of the board: Bittensor dTAO $314M, Steakhouse Financial $243M, Sentora Curator $232M, Gauntlet $146M, Veda $138M.
+| # | Protocol | Implied value |
+|---|----------|--------------:|
+| 1 | Steakhouse Financial | $286.7M |
+| 2 | Sentora Curator | $257.6M |
+| 3 | Gauntlet | $192.3M |
+| 4 | Veda | $181.5M |
+| 5 | USDD | $123.7M |
+| 6 | Upshift | $83M |
+| 7 | Polymarket International | $62M |
+| 8 | Nonce Capital | $52M |
+| 9 | CIAN Yield Layer | $49M |
+| 10 | OnRe | $44M |
 
 ## Run it
 
-```
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
+```sh
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../kit/token-radar-01-kit/input/snapshot.json
 ```
 
-`main.ts` (Node 22, standard library only) reads the sealed snapshot, writes `board.json`, the dashboard's data beside the page, copies `dashboard/` and `screenshots/`, and writes `dossier.json`. Both runs write the same bytes: the model is deterministic, anchored to the snapshot's own `as_of` date. Open `out/dashboard/index.html` in a browser; click any row for its detail view and farm plan.
+That writes `out/board.json`, `out/data.js`, `out/dashboard/`, `out/screenshots/` and
+`out/dossier.json`. The program runs twice and writes identical bytes both times. The three
+screenshots in `screenshots/` are rendered from the dashboard with headless Chromium at
+1440x900: the board, the detail view for the #1 protocol, and the board filtered to Lending.
+
+## Layout
+
+- `main.ts` — entrypoint: read the snapshot, score the board, write the outputs and the dossier.
+- `lib/model.ts` — the model, the watchlist rule, the farm-plan templates, the board builder.
+- `dashboard/` — `index.html`, `app.css`, `app.js`: the static board, detail view, live-token
+  reference and model sandbox. No framework, no network.
+- `vendor/makefun-board.ts` — make.fun's dossier library, copied byte for byte from the kit.
+- `screenshots/` — the three dashboard screenshots, 1440x900.
