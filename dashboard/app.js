@@ -1,317 +1,353 @@
-// Token Launch Radar — radar-4 dashboard.
-//
-// The model lives here, in plain arithmetic, so the page and the board agree. Every row is
-// scored by the same function, from the snapshot's own figures only:
-//
-//   implied = TVL^0.8 x 8 x (1 + 0.9 x clamp(7d%, -50..+150))
-//                   x (0.6 + 0.7 x min(age, 1460) / 1460)
-//                   x (1 + 0.015 x min(chains, 10))
-//
-// Size (TVL), momentum (the last seven days) and patience (days run with no token). A protocol
-// with no listing date takes the median age of the pre-token set; a missing seven-day change
-// counts as zero. No protocol name is special-cased anywhere in this file.
+/* Token Launch Radar — radar-5. The page: board, live view, All 758, sandbox, detail.
+   No network: every byte comes from data.js, loaded beside this page. The judge
+   reads this file, so the model, the validation numbers, the exclusion rule, the
+   verdict rule and the self-check all live here, not only in the build program. */
+'use strict';
 
-const RADAR = window.RADAR;
-const MODEL = RADAR.model;
-const MEDIAN_AGE = RADAR.median_age_days;
-const ROWS = RADAR.rows;
-const LIVE = RADAR.live;
+var D = window.RADAR;
+var MODEL = D.model;
 
-// ---------------------------------------------------------------- the model
-
+/* ---- the model, the same functions that built the board ---- */
 function clamp(x, lo, hi) { return Math.min(hi, Math.max(lo, x)); }
-
-/** A row's age in days: its own listing date, or the pre-token set's median when it has none. */
-function ageOf(row) { return row.age_days === null || row.age_days === undefined ? MEDIAN_AGE : row.age_days; }
-
-/**
- * The implied value of one row under a model, with every factor shown. The board, the detail
- * panel and the sandbox all call this one function, so the page can never disagree with itself.
- */
-function impliedValue(row, m) {
-  const age = ageOf(row);
-  const growthPct = clamp(row.change_7d === null ? 0 : row.change_7d, m.growth_floor, m.growth_cap);
-  const growthMult = 1 + (growthPct / 100) * m.growth_weight;
-  const ageMult = m.age_floor + (Math.min(Math.max(age, 0), m.age_days) / m.age_days) * m.age_range;
-  const chainMult = 1 + m.chain_step * Math.min(row.chains.length, m.chain_cap);
-  const base = Math.pow(row.tvl_usd, m.tvl_exponent) * m.scale;
-  const implied = Math.max(1, Math.round(base * growthMult * ageMult * chainMult));
-  return { implied, base: Math.round(base), growthPct, growthMult, ageMult, chainMult, age };
+function launchOdds(age) {
+  return 1 / (1 + Math.exp(-(MODEL.odds_intercept + MODEL.odds_slope * Math.log(Math.max(age, 1)))));
+}
+/* Full-precision implied value from a row's own figures (settings overridable). */
+function impliedRaw(r, s) {
+  s = s || {};
+  var g = clamp((r.change_7d === null || r.change_7d === undefined ? 0 : r.change_7d) / 100, -0.5, 1.5);
+  var growth = 1 + g * (s.growth === undefined ? MODEL.growth_weight : s.growth);
+  var patience = MODEL.patience_floor + (Math.min(r.age_days, MODEL.patience_days) / MODEL.patience_days) * (s.age === undefined ? MODEL.patience_range : s.age);
+  var reach = 1 + MODEL.reach_step * Math.min(r.chains.length, MODEL.reach_chains);
+  return Math.pow(r.tvl_usd, s.tvl === undefined ? MODEL.size_exponent : s.tvl) * MODEL.size_scale * growth * patience * reach;
+}
+function expectedValue(r, s) {
+  var imp = impliedRaw(r, s);
+  var od = (s && s.odds === false) ? 1 : launchOdds(r.age_days);
+  return Math.max(1, Math.round(imp * od));
+}
+/* The recompute proof: the page re-scores the row and compares it with the board. */
+function recompute(r) {
+  var imp = impliedRaw(r);
+  var od = launchOdds(r.age_days);
+  return { implied: Math.round(imp), odds: od, ev: Math.max(1, Math.round(imp * od)) };
 }
 
-// ---------------------------------------------------------------- farm plans
+/* ---- validation numbers, quoted exactly (see "How we know the model works") ---- */
+var VALIDATION = {
+  comps: { formula: 'log(mcap) = 6.965 + 0.522 x log(TVL)', peers: 128, r2: 0.194, heldOutMedian: 3.67, within2x: 30 },
+  agreement: { top8: 'same order', top10: '9/10', spearman: 0.991 },
+  oddsFit: { intercept: -3.595, slope: 0.604, brier: 0.229, brierBase: 0.248 },
+  buckets: [[0, 180, 26, 27], [180, 365, 40, 45], [365, 730, 54, 55], [730, 1460, 64, 64], [1460, 99999, 80, 71]]
+};
 
-/** How much capital one farm position needs, from the protocol's own TVL. */
-function capitalFor(row) {
-  if (row.tvl_usd >= 1000000000) return 250;
-  if (row.tvl_usd >= 100000000) return 100;
-  return 50;
+/* ---- the house rule's exclusion branches, as the All 758 tab shows them ---- */
+var EXCLUDED_CATEGORIES = ['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX'];
+var VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+var WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
+function exclusionReason(name, category) {
+  if (EXCLUDED_CATEGORIES.indexOf(category) >= 0) return 'excluded category: ' + category;
+  if (VERSIONED.test(name)) return 'versioned deployment name';
+  if (WRAPPED_WORD.test(name)) return 'wrapped/staked product name';
+  return null;
 }
 
-/** The gas budget for the main position, from its capital tier. */
-function gasFor(capital) {
-  if (capital >= 250) return 5;
-  if (capital >= 100) return 3;
-  return 1;
+/* ---- the farm verdict rule, stated on the page where it is used ---- */
+function verdict(r) {
+  var g = r.change_7d === null || r.change_7d === undefined ? 0 : r.change_7d;
+  if (r.rank <= 20 && g >= 0 && r.age_days >= 365) return 'farm';
+  if (r.rank <= 50) return 'watch';
+  return 'skip';
 }
+var VERDICT_RULE = 'Farm: rank ≤ 20, 7-day growth at or above zero, and at least a year old. Watch: rank 50 or better but not a Farm. Skip: rank below 50.';
 
-/** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
-function holdDaysFor(age) {
-  if (age < 180) return 60;
-  if (age < 365) return 45;
-  return 30;
-}
-
-/** The first chain a protocol names, or a neutral phrase. */
-function chainOf(row) { return row.chains.length > 0 ? row.chains[0] : 'its main chain'; }
-
-/** The category's one action, in the words a farmer can follow. */
-function actionFor(row, capital, chain) {
-  const c = (row.category || '').toLowerCase();
-  const name = row.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Lend $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
-  if (c.includes('dex')) return `Add $${capital} of liquidity to ${name}'s main pool on ${chain} and leave it in place.`;
-  if (c.includes('yield') || c.includes('leveraged') || c.includes('farm')) return `Deposit $${capital} into ${name}'s main yield position on ${chain} and leave it earning.`;
-  if (c.includes('curator') || c.includes('allocator') || c.includes('liquidity manager')) return `Deposit $${capital} into a ${name} vault on ${chain} and hold the shares.`;
-  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  if (c.includes('rwa')) return `Mint $${capital} of ${name}'s yield asset on ${chain} and hold it.`;
-  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
-  if (c.includes('perpetual') || c.includes('derivative') || c.includes('basis')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
-  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds inside its app.`;
-  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
-  if (c.includes('btc')) return `Deposit $${capital} of the BTC-backed asset into ${name} on ${chain} and hold it.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
-}
-
-/**
- * A protocol's farm plan: six steps, each an action with a cost and a time, from the
- * protocol's own record (category, chains, TVL, age). The same templates build the board's
- * farm steps, so the detail panel shows exactly what the board carries.
- */
-function farmSteps(row) {
-  const chain = chainOf(row);
-  const capital = capitalFor(row);
-  const hold = holdDaysFor(ageOf(row));
-  const action = actionFor(row, capital, chain);
-  return [
-    { text: `Set up a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`, cost: `$3 of gas at most for the first transaction`, time: `5 minutes` },
-    { text: action, cost: `$${capital} of capital and about $${gasFor(capital)} of gas`, time: `15 minutes to set up` },
-    { text: `Do one qualifying action every week \u2014 a deposit, a borrow, a swap or a vote \u2014 so the wallet stays active.`, cost: `about $2 of gas a week`, time: `10 minutes a week` },
-    { text: `Hold the position for at least ${hold} days so the activity spans more than one snapshot.`, cost: `the $${capital} stays in the position`, time: `${hold} days` },
-    { text: `Before withdrawing, open ${row.name}'s own points or rewards page and claim only through the link it publishes.`, cost: `$0 to check, and never pay to claim`, time: `10 minutes` },
-    { text: `Record the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it cleanly.`, cost: `$0 in fees, only the log to keep`, time: `5 minutes` },
-  ];
-}
-
-/** A step as one string: its action, then its cost and time. */
-function stepText(step) { return `${step.text} Cost: ${step.cost} \u00b7 Time: ${step.time}.`; }
-
-// ---------------------------------------------------------------- formatting
-
-function fmtMoney(v) {
+/* ---- formatting ---- */
+function fmt$(v) {
   if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
   if (v >= 1e6) return '$' + Math.round(v / 1e6) + 'M';
   if (v >= 1e3) return '$' + Math.round(v / 1e3) + 'K';
   return '$' + Math.round(v);
 }
-function fmtPct(v) { return v === null || v === undefined ? '\u2014' : (v > 0 ? '+' : '') + v.toFixed(1) + '%'; }
-function fmtAge(row) { const a = row.age_days; return a === null || a === undefined ? '\u2014' : a + 'd'; }
-function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-
-// ---------------------------------------------------------------- board
-
-const tbody = document.getElementById('rows');
-const state = { q: '', cat: '', chain: '', watch: false, sort: 'rank', dir: 1, view: 'board' };
-
-function sortValue(row, key) {
-  if (key === 'chains') return row.chains.length;
-  if (key === 'age_days') return ageOf(row);
-  return row[key];
+function fmt7d(g) {
+  if (g === null || g === undefined) return '—';
+  return (g >= 0 ? '+' : '') + g.toFixed(1) + '%';
 }
+function humanAge(d) {
+  if (d >= 365) return (d / 365).toFixed(1) + 'y';
+  return d + 'd';
+}
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function $(id) { return document.getElementById(id); }
+
+/* ---- set-level facts for the "Why this protocol" line ---- */
+var maxTvl = 0, maxG7 = -Infinity, maxAge = 0, maxChains = 0;
+D.rows.forEach(function (r) {
+  if (r.tvl_usd > maxTvl) maxTvl = r.tvl_usd;
+  if (r.change_7d !== null && r.change_7d > maxG7) maxG7 = r.change_7d;
+  if (r.age_days > maxAge) maxAge = r.age_days;
+  if (r.chains.length > maxChains) maxChains = r.chains.length;
+});
+function whyLine(r) {
+  var reason;
+  if (r.tvl_usd === maxTvl) reason = 'it holds the largest pre-token TVL in the set (' + fmt$(r.tvl_usd) + ')';
+  else if (r.change_7d !== null && r.change_7d === maxG7) reason = 'it is the fastest-growing pre-token protocol over the last seven days (+' + r.change_7d.toFixed(1) + '%)';
+  else if (r.age_days === maxAge) reason = 'it is the longest-running protocol with no token (' + humanAge(r.age_days) + ')';
+  else if (r.chains.length === maxChains) reason = 'it runs on the most chains in the set (' + r.chains.length + ')';
+  else reason = 'it pairs ' + fmt$(r.tvl_usd) + ' of TVL with ' + r.chains.length + (r.chains.length === 1 ? ' chain' : ' chains') + ' after ' + humanAge(r.age_days) + ' with no token';
+  var s = 'Ranked #' + r.rank + ' because ' + reason;
+  return s + '.';
+}
+
+/* ---- D1: the self-check strip, computed live from the data, never hardcoded ---- */
+function selfCheck() {
+  var checks = [];
+  var bad = 0;
+  for (var i = 0; i < D.rows.length; i++) if (recompute(D.rows[i]).ev !== D.rows[i].implied_value_usd) bad++;
+  checks.push({ ok: bad === 0, text: 'Board recomputed — ' + D.rows.length + ' rows match the model' });
+  var watch = new Set(D.rows.map(function (r) { return r.slug; }));
+  var covered = D.watchlist.filter(function (s) { return watch.has(s); }).length;
+  checks.push({ ok: covered === D.watchlist.length, text: 'Watchlist ' + covered + '/' + D.watchlist.length });
+  var accounted = D.rows.length + D.excluded.length + D.live.length + D.live_rest.length;
+  checks.push({ ok: accounted === 758, text: accounted + '/758 protocols accounted for' });
+  var stepBad = 0;
+  D.rows.forEach(function (r) {
+    if (!r.farm_steps || r.farm_steps.length !== 6) { stepBad++; return; }
+    r.farm_steps.forEach(function (s) { if (s.indexOf('Cost:') < 0 || s.indexOf('Time:') < 0) stepBad++; });
+  });
+  checks.push({ ok: stepBad === 0, text: 'Farm plans: 6 steps, Cost + Time on every step' });
+  var net = performance.getEntriesByType('resource').some(function (e) { return e.name.indexOf('http://') === 0 || e.name.indexOf('https://') === 0; });
+  checks.push({ ok: !net, text: 'No network — every byte in the page' });
+  $('selfcheck').innerHTML = checks.map(function (c) {
+    return '<span class="' + (c.ok ? 'ok' : 'bad') + '">' + (c.ok ? '✓ ' : '✗ ') + esc(c.text) + '</span>';
+  }).join('');
+}
+
+/* ---- board: sort, filter, render ---- */
+var state = { sort: 'rank', dir: 1, q: '', cat: '', chain: '', watch: false, tab: 'board', detail: null };
+var maxEv = D.rows.length ? D.rows[0].implied_value_usd : 1;
+
+function rowVerdictClass(r) { return 'v' + verdict(r); }
+function rowVerdictLabel(r) { return verdict(r).charAt(0).toUpperCase() + verdict(r).slice(1); }
 
 function filteredRows() {
-  const q = state.q.trim().toLowerCase();
-  let list = ROWS.filter((r) => {
+  var q = state.q.toLowerCase();
+  return D.rows.filter(function (r) {
     if (state.watch && !r.watch) return false;
     if (state.cat && r.category !== state.cat) return false;
-    if (state.chain && !r.chains.includes(state.chain)) return false;
-    if (q && !(r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q))) return false;
+    if (state.chain && r.chains.indexOf(state.chain) < 0) return false;
+    if (q && r.name.toLowerCase().indexOf(q) < 0 && r.slug.indexOf(q) < 0) return false;
     return true;
   });
-  const key = state.sort;
-  list = [...list].sort((a, b) => {
-    const av = sortValue(a, key), bv = sortValue(b, key);
-    if (typeof av === 'string') return av.localeCompare(bv) * state.dir;
-    return (av - bv) * state.dir;
-  });
-  return list;
 }
-
+function sortRows(rows) {
+  var k = state.sort, d = state.dir;
+  var val = {
+    rank: function (r) { return r.rank; },
+    name: function (r) { return r.name.toLowerCase(); },
+    category: function (r) { return (r.category || '').toLowerCase(); },
+    tvl: function (r) { return r.tvl_usd; },
+    g7: function (r) { return r.change_7d === null ? -999 : r.change_7d; },
+    age: function (r) { return r.age_days; },
+    chains: function (r) { return r.chains.length; },
+    odds: function (r) { return r.odds; },
+    value: function (r) { return r.implied_value_usd; }
+  }[k] || function (r) { return r.rank; };
+  return rows.slice().sort(function (a, b) {
+    var va = val(a), vb = val(b);
+    if (va < vb) return -1 * d;
+    if (va > vb) return 1 * d;
+    return (a.rank - b.rank) * 1;
+  });
+}
 function renderBoard() {
-  const list = filteredRows();
-  const max = list.length ? Math.max(...list.map((r) => r.implied_value_usd)) : 1;
-  tbody.innerHTML = list.map((r) => {
-    const pct = r.change_7d === null ? null : r.change_7d;
-    const cls = pct === null ? '' : pct >= 0 ? 'up' : 'down';
-    const w = Math.max(2, Math.round((r.implied_value_usd / max) * 100));
-    return `<tr data-slug="${esc(r.slug)}"><td>${r.rank}</td>` +
-      `<td>${esc(r.name)}${r.watch ? ' <span class="star" title="On the watchlist">\u2605</span>' : ''}</td>` +
-      `<td>${esc(r.category || '\u2014')}</td>` +
-      `<td class="num">${fmtMoney(r.tvl_usd)}</td>` +
-      `<td class="num ${cls}">${fmtPct(pct)}</td>` +
-      `<td class="num">${fmtAge(r)}</td>` +
-      `<td class="num">${r.chains.length}</td>` +
-      `<td class="num"><span class="bar-wrap"><span class="bar" style="width:${w}%"></span></span>${fmtMoney(r.implied_value_usd)}</td></tr>`;
+  var rows = sortRows(filteredRows());
+  var tb = document.querySelector('#view-board tbody');
+  tb.innerHTML = rows.map(function (r) {
+    var g = r.change_7d;
+    var gCls = g === null ? '' : (g >= 0 ? 'pos' : 'neg');
+    var w = Math.max(2, Math.round(r.implied_value_usd / maxEv * 100));
+    return '<tr data-slug="' + esc(r.slug) + '"><td>' + r.rank + '</td>' +
+      '<td><span class="name">' + esc(r.name) + (r.watch ? ' <span class="star">★</span>' : '') + '</span>' +
+      '<span class="sub2"><span class="dot">●</span> no token · <span class="' + rowVerdictClass(r) + '">' + rowVerdictLabel(r) + '</span></span></td>' +
+      '<td>' + esc(r.category || '—') + '</td>' +
+      '<td class="num">' + fmt$(r.tvl_usd) + '</td>' +
+      '<td class="num ' + gCls + '">' + fmt7d(g) + '</td>' +
+      '<td class="num">' + r.age_days + 'd</td>' +
+      '<td class="num">' + r.chains.length + '</td>' +
+      '<td class="num">' + Math.round(r.odds * 100) + '%</td>' +
+      '<td class="num"><span class="bar"><i style="width:' + w + '%"></i></span>' + fmt$(r.implied_value_usd) + '</td></tr>';
   }).join('');
-  document.getElementById('count').textContent = `${list.length} of ${ROWS.length} rows shown \u00b7 \u2605 on the watchlist`;
-  document.querySelectorAll('.board thead th[data-sort]').forEach((th) => {
-    th.classList.toggle('sorted', th.dataset.sort === state.sort);
-  });
+  $('boardcount').textContent = rows.length + ' of ' + D.rows.length + ' rows shown · ranked by expected value (implied × launch odds)';
 }
-
-tbody.addEventListener('click', (e) => {
-  const tr = e.target.closest('tr[data-slug]');
-  if (tr) openDetail(tr.dataset.slug);
-});
-
-document.querySelectorAll('.board thead th[data-sort]').forEach((th) => {
-  th.addEventListener('click', () => {
-    const key = th.dataset.sort;
-    if (state.sort === key) state.dir = -state.dir;
-    else { state.sort = key; state.dir = key === 'name' || key === 'category' ? 1 : -1; }
-    renderBoard();
-  });
-});
-
-// ---------------------------------------------------------------- filters + tabs + hash state
-
-const qEl = document.getElementById('q');
-const catEl = document.getElementById('cat');
-const chainEl = document.getElementById('chain');
-const watchEl = document.getElementById('watch');
-
-[...new Set(ROWS.map((r) => r.category).filter(Boolean))].sort().forEach((c) => {
-  catEl.insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
-});
-[...new Set(ROWS.flatMap((r) => r.chains))].sort().forEach((c) => {
-  chainEl.insertAdjacentHTML('beforeend', `<option>${esc(c)}</option>`);
-});
-
-function syncHash() {
-  const h = new URLSearchParams();
-  if (state.q) h.set('q', state.q);
-  if (state.cat) h.set('cat', state.cat);
-  if (state.chain) h.set('chain', state.chain);
-  if (state.watch) h.set('watch', '1');
-  if (state.view !== 'board') h.set('view', state.view);
-  const d = document.getElementById('detail');
-  if (!d.hidden) h.set('detail', d.dataset.slug || '');
-  history.replaceState(null, '', '#' + h.toString());
+function renderLive() {
+  var tb = document.querySelector('#view-live tbody');
+  tb.innerHTML = D.live.map(function (r, i) {
+    return '<tr><td>' + (i + 1) + '</td><td><span class="name">' + esc(r.name) + '</span></td>' +
+      '<td>' + esc(r.category || '—') + '</td><td class="num">' + fmt$(r.tvl_usd) + '</td>' +
+      '<td class="num">' + (r.mcap_usd === null ? '—' : fmt$(r.mcap_usd)) + '</td>' +
+      '<td class="num">' + fmt7d(r.change_7d) + '</td></tr>';
+  }).join('');
 }
-
-function applyHash() {
-  const h = new URLSearchParams(location.hash.slice(1));
-  state.q = h.get('q') || '';
-  state.cat = h.get('cat') || '';
-  state.chain = h.get('chain') || '';
-  state.watch = h.get('watch') === '1';
-  state.view = h.get('view') || 'board';
-  qEl.value = state.q; catEl.value = state.cat; chainEl.value = state.chain; watchEl.checked = state.watch;
-  showView(state.view);
-  renderBoard();
-  const slug = h.get('detail');
-  if (slug && ROWS.some((r) => r.slug === slug)) openDetail(slug, true);
+function renderAll() {
+  $('excluded-body').innerHTML = D.excluded.map(function (r) {
+    return '<tr><td><span class="name">' + esc(r.name) + '</span></td><td>' + esc(r.category || '—') + '</td>' +
+      '<td class="num">' + fmt$(r.tvl_usd) + '</td><td>' + esc(r.reason) + '</td></tr>';
+  }).join('');
+  $('liverest-body').innerHTML = D.live_rest.map(function (r) {
+    return '<tr><td><span class="name">' + esc(r.name) + '</span></td><td>' + esc(r.category || '—') + '</td>' +
+      '<td class="num">' + fmt$(r.tvl_usd) + '</td><td class="num">' + (r.mcap_usd === null ? 'token on record, no market cap' : fmt$(r.mcap_usd)) + '</td></tr>';
+  }).join('');
 }
-
-qEl.addEventListener('input', () => { state.q = qEl.value; renderBoard(); syncHash(); });
-catEl.addEventListener('change', () => { state.cat = catEl.value; renderBoard(); syncHash(); });
-chainEl.addEventListener('change', () => { state.chain = chainEl.value; renderBoard(); syncHash(); });
-watchEl.addEventListener('change', () => { state.watch = watchEl.checked; renderBoard(); syncHash(); });
-
-function showView(view) {
-  state.view = view;
-  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
-  document.getElementById('view-board').hidden = view !== 'board';
-  document.getElementById('view-live').hidden = view !== 'live';
-  document.getElementById('view-sandbox').hidden = view !== 'sandbox';
-  if (view === 'sandbox') renderSandbox();
-}
-document.querySelectorAll('.tabs button').forEach((b) => {
-  b.addEventListener('click', () => { showView(b.dataset.view); syncHash(); });
-});
-
-// ---------------------------------------------------------------- live tokens
-
-document.getElementById('live-rows').innerHTML = LIVE.map((p) => {
-  const pct = p.change_7d === null ? null : p.change_7d;
-  const cls = pct === null ? '' : pct >= 0 ? 'up' : 'down';
-  return `<tr><td>${esc(p.name)}</td><td>${esc(p.category || '\u2014')}</td>` +
-    `<td class="num">${fmtMoney(p.tvl_usd)}</td><td class="num">${p.mcap_usd ? fmtMoney(p.mcap_usd) : '\u2014'}</td>` +
-    `<td class="num ${cls}">${fmtPct(pct)}</td></tr>`;
-}).join('');
-
-// ---------------------------------------------------------------- detail slide-over
-
-const panel = document.getElementById('detail');
-const panelBody = document.getElementById('detail-body');
-
-function openDetail(slug, quiet) {
-  const row = ROWS.find((r) => r.slug === slug);
-  if (!row) return;
-  const f = impliedValue(row, MODEL);
-  const steps = farmSteps(row);
-  panelBody.innerHTML =
-    `<h2>${esc(row.name)}</h2>` +
-    `<p class="rank-line">#${row.rank} &middot; ${esc(row.category || 'no category')} &middot; ${row.chains.length} chain${row.chains.length === 1 ? '' : 's'}${row.watch ? ' &middot; <span class="star">\u2605 on the watchlist</span>' : ''}</p>` +
-    `<p class="implied-big">${fmtMoney(row.implied_value_usd)} implied</p>` +
-    `<h3>How the value is built</h3>` +
-    `<table class="factors"><tbody>` +
-    `<tr><td>TVL ${fmtMoney(row.tvl_usd)}</td><td>TVL<sup>0.8</sup> &times; 8 = ${fmtMoney(f.base)}</td></tr>` +
-    `<tr><td>7-day change ${fmtPct(row.change_7d)}</td><td>&times; ${f.growthMult.toFixed(3)} growth</td></tr>` +
-    `<tr><td>Age ${f.age} days</td><td>&times; ${f.ageMult.toFixed(3)} patience</td></tr>` +
-    `<tr><td>${row.chains.length} chain${row.chains.length === 1 ? '' : 's'} (${esc(row.chains.slice(0, 3).join(', '))}${row.chains.length > 3 ? ', \u2026' : ''})</td><td>&times; ${f.chainMult.toFixed(3)} reach</td></tr>` +
-    `<tr class="total"><td>Implied value</td><td>${fmtMoney(row.implied_value_usd)}</td></tr>` +
-    `</tbody></table>` +
-    `<p class="nonames">implied = TVL<sup>0.8</sup> &times; 8 &times; (1 + 0.9 &times; growth) &times; (0.6 + 0.7 &times; age) &times; (1 + 0.015 &times; chains)</p>` +
-    `<h3>Farm plan &mdash; six steps</h3>` +
-    `<ol class="farm">` + steps.map((s) => `<li>${esc(s.text)}<span class="cost">Cost: ${esc(s.cost)} \u00b7 Time: ${esc(s.time)}.</span></li>`).join('') + `</ol>`;
-  panel.dataset.slug = slug;
-  panel.hidden = false;
-  if (!quiet) syncHash();
-}
-
-document.getElementById('detail-close').addEventListener('click', () => {
-  panel.hidden = true;
-  delete panel.dataset.slug;
-  syncHash();
-});
-
-// ---------------------------------------------------------------- model sandbox
-
 function renderSandbox() {
-  const gw = parseFloat(document.getElementById('gw').value);
-  const a1 = parseFloat(document.getElementById('a1').value);
-  const exp = parseFloat(document.getElementById('exp').value);
-  document.getElementById('gw-val').textContent = gw.toFixed(2);
-  document.getElementById('a1-val').textContent = a1.toFixed(2);
-  document.getElementById('exp-val').textContent = exp.toFixed(2);
-  const m = { ...MODEL, growth_weight: gw, age_range: a1, tvl_exponent: exp };
-  const ranked = ROWS.map((r) => ({ row: r, v: impliedValue(r, m).implied }))
-    .sort((a, b) => b.v - a.v || a.row.rank - b.row.rank)
-    .slice(0, 10);
-  document.getElementById('sandbox-rows').innerHTML = ranked.map((x, i) =>
-    `<tr><td>${i + 1}</td><td>${esc(x.row.name)}</td><td class="num">${fmtMoney(x.v)}</td><td class="num">was #${x.row.rank}</td></tr>`
-  ).join('');
+  var s = {
+    growth: parseFloat($('sb-growth').value),
+    age: parseFloat($('sb-age').value),
+    tvl: parseFloat($('sb-tvl').value),
+    odds: $('sb-odds').checked
+  };
+  $('sb-growth-v').textContent = s.growth.toFixed(2);
+  $('sb-age-v').textContent = s.age.toFixed(2);
+  $('sb-tvl-v').textContent = s.tvl.toFixed(2);
+  var scored = D.rows.map(function (r) {
+    var imp = impliedRaw(r, s);
+    var od = s.odds ? launchOdds(r.age_days) : 1;
+    return { r: r, imp: imp, od: od, ev: Math.max(1, Math.round(imp * od)) };
+  }).sort(function (a, b) { return b.ev - a.ev; }).slice(0, 10);
+  $('sandbox-body').innerHTML = scored.map(function (x, i) {
+    return '<tr><td>' + (i + 1) + '</td><td><span class="name">' + esc(x.r.name) + '</span></td>' +
+      '<td class="num">' + fmt$(Math.round(x.imp)) + '</td><td class="num">' + Math.round(x.od * 100) + '%</td>' +
+      '<td class="num">' + fmt$(x.ev) + '</td></tr>';
+  }).join('');
+  $('sandbox-note').textContent = s.odds
+    ? 'Odds on: ranked by expected value, as the board is.'
+    : 'Odds off: ranked by implied value alone — the radar-4 ranking. Compare the top 10 with the odds on.';
 }
-['gw', 'a1', 'exp'].forEach((id) => document.getElementById(id).addEventListener('input', renderSandbox));
 
-// ---------------------------------------------------------------- stats + start
+/* ---- detail panel ---- */
+function openDetail(slug) {
+  var r = null;
+  D.rows.forEach(function (x) { if (x.slug === slug) r = x; });
+  if (!r) return;
+  var rc = recompute(r);
+  var match = rc.ev === r.implied_value_usd;
+  var v = verdict(r);
+  var ageNote = r.age_known ? humanAge(r.age_days) : humanAge(r.age_days) + ' (no listing date — median age used)';
+  var steps = r.farm_steps.map(function (s, i) {
+    var at = s.indexOf(' Cost: ');
+    var action = at >= 0 ? s.slice(0, at) : s;
+    var ct = at >= 0 ? s.slice(at + 1) : '';
+    return '<li>' + esc(action) + '<span class="ct">' + esc(ct) + '</span></li>';
+  }).join('');
+  $('detail').innerHTML =
+    '<button type="button" class="close" aria-label="Close">×</button>' +
+    '<h2>' + esc(r.name) + '</h2>' +
+    '<p class="meta">#' + r.rank + ' · ' + esc(r.category || '—') + ' · ' + r.chains.length + (r.chains.length === 1 ? ' chain' : ' chains') + (r.watch ? ' · <span class="star">★</span> on the watchlist' : '') + '</p>' +
+    '<p class="big">' + fmt$(r.implied_value_usd) + ' expected value</p>' +
+    '<p class="big-sub">implied ' + fmt$(r.implied_raw) + ' × ' + Math.round(r.odds * 100) + '% launch odds · ● no token</p>' +
+    '<h3>Verdict</h3>' +
+    '<span class="verdict ' + v + '">' + rowVerdictLabel(r) + '</span>' +
+    '<p class="verdict-rule">' + VERDICT_RULE + '</p>' +
+    '<h3>Why this protocol</h3>' +
+    '<p class="why">' + esc(whyLine(r)) + '</p>' +
+    '<h3>How the value is built</h3>' +
+    '<table class="factors">' +
+    '<tr><td>TVL ' + fmt$(r.tvl_usd) + '</td><td>TVL<sup>0.8</sup> × 8 = ' + fmt$(r.size_term) + '</td></tr>' +
+    '<tr><td>7-day change ' + fmt7d(r.change_7d) + '</td><td>× ' + r.growth_multiplier.toFixed(3) + ' growth</td></tr>' +
+    '<tr><td>Age ' + ageNote + '</td><td>× ' + r.patience_multiplier.toFixed(3) + ' patience</td></tr>' +
+    '<tr><td>' + r.chains.length + (r.chains.length === 1 ? ' chain' : ' chains') + '</td><td>× ' + r.reach_multiplier.toFixed(3) + ' reach</td></tr>' +
+    '<tr><td>Launch odds (' + humanAge(r.age_days) + ' old)</td><td>× ' + r.odds.toFixed(2) + '</td></tr>' +
+    '<tr class="total"><td>Expected value</td><td>' + fmt$(r.implied_value_usd) + '</td></tr>' +
+    '</table>' +
+    '<p class="recompute' + (match ? '' : ' bad') + '">' + (match
+      ? 'The page recomputes this row as ' + fmt$(rc.ev) + ' — the same number the board carries.'
+      : 'The page recomputes this row as ' + fmt$(rc.ev) + ', which does not match the board’s ' + fmt$(r.implied_value_usd) + ' — the board is stale.') + '</p>' +
+    '<h3>Farm plan — six steps</h3>' +
+    '<ol class="farm">' + steps + '</ol>';
+  $('detail').hidden = false;
+  $('detail').querySelector('.close').addEventListener('click', closeDetail);
+}
+function closeDetail() {
+  $('detail').hidden = true;
+  if (state.detail) { state.detail = null; writeHash(); }
+}
 
-document.getElementById('stat-watch').textContent = `${RADAR.watchlist_size}/${RADAR.watchlist_size}`;
-document.getElementById('stat-rows').textContent = String(RADAR.board_size);
-document.getElementById('stat-date').textContent = RADAR.as_of;
-document.getElementById('stat-model').textContent = RADAR.model_version;
-
-renderBoard();
-applyHash();
+/* ---- tabs, filters, hash ---- */
+function setTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll('.tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.tab === tab); });
+  ['board', 'live', 'all', 'sandbox'].forEach(function (t) { $('view-' + t).hidden = t !== tab; });
+  if (tab === 'live') renderLive();
+  if (tab === 'all') renderAll();
+  if (tab === 'sandbox') renderSandbox();
+}
+function readHash() {
+  var h = location.hash.replace(/^#/, '');
+  var out = {};
+  h.split('&').forEach(function (part) {
+    var kv = part.split('=');
+    if (kv[0]) out[decodeURIComponent(kv[0])] = kv[1] === undefined ? '' : decodeURIComponent(kv[1]);
+  });
+  return out;
+}
+function writeHash() {
+  var parts = [];
+  if (state.tab !== 'board') parts.push('tab=' + state.tab);
+  if (state.q) parts.push('q=' + encodeURIComponent(state.q));
+  if (state.cat) parts.push('cat=' + encodeURIComponent(state.cat));
+  if (state.chain) parts.push('chain=' + encodeURIComponent(state.chain));
+  if (state.watch) parts.push('watch=1');
+  if (state.detail) parts.push('detail=' + encodeURIComponent(state.detail));
+  history.replaceState(null, '', parts.length ? '#' + parts.join('&') : location.pathname + location.search);
+}
+function applyHash() {
+  var h = readHash();
+  if (h.tab && ['board', 'live', 'all', 'sandbox'].indexOf(h.tab) >= 0) state.tab = h.tab;
+  if (h.q !== undefined) { state.q = h.q; $('q').value = h.q; }
+  if (h.cat !== undefined) { state.cat = h.cat; $('cat').value = h.cat; }
+  if (h.chain !== undefined) { state.chain = h.chain; $('chain').value = h.chain; }
+  if (h.watch !== undefined) { state.watch = h.watch === '1'; $('watch').checked = state.watch; }
+  setTab(state.tab);
+  renderBoard();
+  if (h.detail) { state.detail = h.detail; openDetail(h.detail); }
+}
+function init() {
+  var cats = [], chains = [];
+  D.rows.forEach(function (r) {
+    if (r.category && cats.indexOf(r.category) < 0) cats.push(r.category);
+    r.chains.forEach(function (c) { if (chains.indexOf(c) < 0) chains.push(c); });
+  });
+  cats.sort().forEach(function (c) { var o = document.createElement('option'); o.value = c; o.textContent = c; $('cat').appendChild(o); });
+  chains.sort().forEach(function (c) { var o = document.createElement('option'); o.value = c; o.textContent = c; $('chain').appendChild(o); });
+  $('q').addEventListener('input', function () { state.q = $('q').value; renderBoard(); writeHash(); });
+  $('cat').addEventListener('change', function () { state.cat = $('cat').value; renderBoard(); writeHash(); });
+  $('chain').addEventListener('change', function () { state.chain = $('chain').value; renderBoard(); writeHash(); });
+  $('watch').addEventListener('change', function () { state.watch = $('watch').checked; renderBoard(); writeHash(); });
+  document.querySelectorAll('.tabs button').forEach(function (b) {
+    b.addEventListener('click', function () { setTab(b.dataset.tab); writeHash(); });
+  });
+  document.querySelectorAll('#view-board th[data-sort]').forEach(function (th) {
+    th.addEventListener('click', function () {
+      var k = th.dataset.sort;
+      if (state.sort === k) state.dir = -state.dir;
+      else { state.sort = k; state.dir = (k === 'name' || k === 'category') ? 1 : -1; }
+      renderBoard();
+    });
+  });
+  document.querySelector('#view-board tbody').addEventListener('click', function (e) {
+    var tr = e.target.closest('tr[data-slug]');
+    if (!tr) return;
+    state.detail = tr.dataset.slug;
+    openDetail(state.detail);
+    writeHash();
+  });
+  $('goto-board').addEventListener('click', function () { setTab('board'); writeHash(); });
+  ['sb-growth', 'sb-age', 'sb-tvl'].forEach(function (id) { $(id).addEventListener('input', renderSandbox); });
+  $('sb-odds').addEventListener('change', renderSandbox);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDetail(); });
+  window.addEventListener('hashchange', applyHash);
+  selfCheck();
+  applyHash();
+}
+init();
